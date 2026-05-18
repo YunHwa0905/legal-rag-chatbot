@@ -194,7 +194,7 @@ class LegalRetriever:
         for i, doc in enumerate(results, 1):
             context_parts.append(
                 f"[문서 {i}] ({doc['law_category']} - {doc['doc_type']})\n"
-                f"{doc['text']}\n"
+                f"{doc['text'][:300]}\n"    # 전체 → 300자로 제한
                 f"출처: {doc['source']}"
             )
 
