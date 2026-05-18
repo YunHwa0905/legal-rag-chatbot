@@ -241,20 +241,19 @@ def run():
     print("\n[법률 분야별 RAG 문서 수]")
     category_count = {}
     for doc in rag_documents:
-        cat = doc["law_category"]
+        cat = str(doc["law_category"])  # int → str 변환
         category_count[cat] = category_count.get(cat, 0) + 1
-    for cat, count in sorted(category_count.items()):
+    for cat, count in sorted(category_count.items(), key=lambda x: str(x[0])):
         print(f"  {cat}: {count}개")
 
     print("\n[문서 유형별 파인튜닝 데이터 수]")
     type_count = {}
     for item in alpaca_dataset:
-        dtype = item["metadata"]["doc_type"]
+        dtype = str(item["metadata"]["doc_type"])  # int → str 변환
         type_count[dtype] = type_count.get(dtype, 0) + 1
-    for dtype, count in sorted(type_count.items()):
+    for dtype, count in sorted(type_count.items(), key=lambda x: str(x[0])):
         print(f"  {dtype}: {count}개")
 
 
 if __name__ == "__main__":
     run()
-    
