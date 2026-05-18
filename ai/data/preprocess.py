@@ -157,13 +157,13 @@ def to_rag_document(parsed, doc_id):
 
 
 def to_alpaca(parsed):
+    # 기존 노트북 방식과 동일
+    # instruction = 질문
+    # input = 법률 도메인 (모델이 도메인 인식하도록)
+    # output = 답변
     return {
-        "instruction": (
-            "당신은 대한민국 법률 전문 AI 어시스턴트입니다. "
-            "질문에 대해 정확하고 신뢰할 수 있는 법률 정보를 제공하세요. "
-            "답변은 관련 법령과 판례를 근거로 작성하세요."
-        ),
-        "input": parsed["question"],
+        "instruction": parsed["question"],
+        "input": parsed["law_category"],
         "output": parsed["answer"],
         "metadata": {
             "law_category": parsed["law_category"],
