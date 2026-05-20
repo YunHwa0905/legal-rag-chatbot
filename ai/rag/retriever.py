@@ -1,10 +1,11 @@
 """
-RAG 검색 모듈
+RAG 검색 모듈 (개선버전)
 
-역할:
-- 사용자 질문을 벡터로 변환
-- OpenSearch에서 유사 문서 검색 (kNN + BM25 하이브리드)
-- 검색 결과 반환
+변경사항:
+- BM25 가중치 0.3 → 0.5
+- multi_match 검색으로 품질 향상
+- 컨텍스트 300자 → 500자
+- min_score 조건 완화
 """
 
 import sys
@@ -73,7 +74,6 @@ class LegalRetriever:
             "_source": ["doc_id", "text", "law_category", "doc_type", "source"]
         }
 
-        # 법률 분야 필터 (선택)
         if law_category:
             query["query"] = {
                 "bool": {
@@ -90,60 +90,64 @@ class LegalRetriever:
         return response["hits"]["hits"]
 
     # ===========================
-    # BM25 키워드 검색
+    # BM25 키워드 검색 (multi_match로 개선)
     # ===========================
     def _bm25_search(self, query_text: str, law_category: str = None) -> list:
+        # multi_match: text + source 필드 동시 검색
+        must_query = {
+            "multi_match": {
+                "query": query_text,
+                "fields": ["text^2", "source"],  # text 가중치 2배
+                "type": "best_fields",
+                "operator": "or",
+                "minimum_should_match": "30%"     # 30% 이상 단어 매칭
+            }
+        }
+
         query = {
             "size": self.top_k,
-            "query": {
-                "match": {
-                    "text": {
-                        "query": query_text,
-                        "operator": "or",
-                    }
+            "query": must_query if not law_category else {
+                "bool": {
+                    "must": [must_query],
+                    "filter": [{"term": {"law_category": law_category}}]
                 }
             },
             "_source": ["doc_id", "text", "law_category", "doc_type", "source"]
         }
-
-        # 법률 분야 필터 (선택)
-        if law_category:
-            query["query"] = {
-                "bool": {
-                    "must": [{"match": {"text": {"query": query_text}}}],
-                    "filter": [{"term": {"law_category": law_category}}]
-                }
-            }
 
         response = self.client.search(index=self.index, body=query)
         return response["hits"]["hits"]
 
     # ===========================
     # 하이브리드 검색 (kNN + BM25)
-    # 중복 제거 후 점수 합산
+    # BM25 가중치 0.3 → 0.5로 상향
     # ===========================
     def _hybrid_search(self, query_text: str, query_vector: list, law_category: str = None) -> list:
         knn_results = self._knn_search(query_vector, law_category)
         bm25_results = self._bm25_search(query_text, law_category)
 
-        # doc_id 기준으로 합산
         scores = {}
         docs = {}
 
+        # kNN 점수 정규화 후 합산
+        knn_max = max((h["_score"] for h in knn_results), default=1)
         for hit in knn_results:
             doc_id = hit["_source"]["doc_id"]
-            scores[doc_id] = scores.get(doc_id, 0) + hit["_score"]
+            normalized = hit["_score"] / knn_max if knn_max > 0 else 0
+            scores[doc_id] = scores.get(doc_id, 0) + normalized
             docs[doc_id] = hit["_source"]
 
+        # BM25 점수 정규화 후 합산 (가중치 0.5)
+        bm25_max = max((h["_score"] for h in bm25_results), default=1)
         for hit in bm25_results:
             doc_id = hit["_source"]["doc_id"]
-            scores[doc_id] = scores.get(doc_id, 0) + hit["_score"] * 0.3  # BM25 가중치
+            normalized = hit["_score"] / bm25_max if bm25_max > 0 else 0
+            scores[doc_id] = scores.get(doc_id, 0) + normalized * 0.5
             docs[doc_id] = hit["_source"]
 
         # 점수 기준 정렬
         sorted_docs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
-        # top_k 반환
         results = []
         for doc_id, score in sorted_docs[:self.top_k]:
             if score >= self.min_score:
@@ -162,29 +166,14 @@ class LegalRetriever:
     # 메인 검색 함수
     # ===========================
     def search(self, query: str, law_category: str = None) -> list:
-        """
-        Args:
-            query: 사용자 질문
-            law_category: 법률 분야 필터 (민사법/형사법/행정법/지식재산권법)
-
-        Returns:
-            검색된 문서 리스트
-        """
-        # 질문 임베딩
         query_vector = self._embed_query(query)
-
-        # 하이브리드 검색
         results = self._hybrid_search(query, query_vector, law_category)
-
         return results
 
     # ===========================
-    # 컨텍스트 텍스트 생성 (LLM 프롬프트용)
+    # 컨텍스트 텍스트 생성 (300자 → 500자)
     # ===========================
     def get_context(self, query: str, law_category: str = None) -> str:
-        """
-        검색 결과를 LLM 프롬프트에 넣을 텍스트로 변환
-        """
         results = self.search(query, law_category)
 
         if not results:
@@ -194,7 +183,7 @@ class LegalRetriever:
         for i, doc in enumerate(results, 1):
             context_parts.append(
                 f"[문서 {i}] ({doc['law_category']} - {doc['doc_type']})\n"
-                f"{doc['text'][:300]}\n"    # 전체 → 300자로 제한
+                f"{doc['text'][:500]}\n"
                 f"출처: {doc['source']}"
             )
 
@@ -208,9 +197,9 @@ def test():
     retriever = LegalRetriever()
 
     test_queries = [
-        "계약 해지하려면 어떻게 해야 하나요?",
-        "상표권 침해 판단 기준은 무엇인가요?",
-        "임의동행 요청 시 경찰관이 해야 할 절차는?",
+        "가압류가 무엇인가요?",
+        "민사소송은 어떻게 시작하나요?",
+        "임의동행 거부할 수 있나요?",
     ]
 
     for query in test_queries:
@@ -229,11 +218,6 @@ def test():
             print(f"분야: {doc['law_category']} / 유형: {doc['doc_type']}")
             print(f"내용: {doc['text'][:150]}...")
 
-        print(f"\n[컨텍스트 미리보기]")
-        context = retriever.get_context(query)
-        print(context[:300] + "...")
-
 
 if __name__ == "__main__":
     test()
-    

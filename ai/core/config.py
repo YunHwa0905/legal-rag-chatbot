@@ -30,9 +30,9 @@ class Settings(BaseSettings):
     OPENSEARCH_HOST: str = "localhost"
     OPENSEARCH_PORT: int = 9200
     OPENSEARCH_USER: str = "admin"
-    OPENSEARCH_PASSWORD: str = "admin"
+    OPENSEARCH_PASSWORD: str = "Legal@Rag2024!"
     OPENSEARCH_INDEX: str = "legal_documents"
-    OPENSEARCH_USE_SSL: bool = False
+    OPENSEARCH_USE_SSL: bool = True
 
     # ===========================
     # RAG 설정
