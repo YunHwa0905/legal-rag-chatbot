@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LexAI - 법률 AI 상담</title>
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Noto Sans KR', sans-serif;
+            background: #f4f6f9;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* 상단 헤더 */
+        .header {
+            background: #fff;
+            border-bottom: 1px solid #e5e7eb;
+            padding: 0 24px;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 17px;
+            font-weight: 700;
+            color: #1a3a6b;
+            letter-spacing: -0.3px;
+        }
+
+        .logo span { color: #4b83d4; }
+
+        .divider-v {
+            width: 1px;
+            height: 20px;
+            background: #e5e7eb;
+        }
+
+        .age-tag {
+            background: #eff6ff;
+            color: #1d4ed8;
+            border: 1px solid #bfdbfe;
+            font-size: 12px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 20px;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .user-chip {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 20px;
+            padding: 5px 12px 5px 8px;
+            font-size: 13px;
+            color: #374151;
+        }
+
+        .avatar-sm {
+            width: 24px; height: 24px;
+            background: #1a3a6b;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .logout-btn {
+            background: transparent;
+            border: 1px solid #e5e7eb;
+            color: #6b7280;
+            padding: 6px 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            font-family: inherit;
+            transition: all 0.2s;
+        }
+
+        .logout-btn:hover { border-color: #dc2626; color: #dc2626; background: #fef2f2; }
+
+        /* 메인 레이아웃 */
+        .main {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        /* 사이드바 */
+        .sidebar {
+            width: 260px;
+            background: #fff;
+            border-right: 1px solid #e5e7eb;
+            display: flex;
+            flex-direction: column;
+            padding: 20px 16px;
+            flex-shrink: 0;
+        }
+
+        .sidebar-title {
+            font-size: 11px;
+            font-weight: 600;
+            color: #9ca3af;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            margin-bottom: 12px;
+            padding: 0 8px;
+        }
+
+        .example-btn {
+            width: 100%;
+            background: transparent;
+            border: none;
+            border-radius: 8px;
+            padding: 10px 12px;
+            text-align: left;
+            font-size: 13px;
+            font-family: inherit;
+            color: #374151;
+            cursor: pointer;
+            transition: all 0.15s;
+            line-height: 1.4;
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            margin-bottom: 4px;
+        }
+
+        .example-btn:hover { background: #f3f4f6; color: #1a3a6b; }
+
+        .example-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+
+        .sidebar-divider {
+            height: 1px;
+            background: #e5e7eb;
+            margin: 16px 0;
+        }
+
+        .info-box {
+            background: #eff6ff;
+            border-radius: 10px;
+            padding: 14px;
+            margin-top: auto;
+        }
+
+        .info-box p {
+            font-size: 12px;
+            color: #1d4ed8;
+            line-height: 1.6;
+        }
+
+        /* 채팅 영역 */
+        .chat-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 28px 32px;
+        }
+
+        .chat-area::-webkit-scrollbar { width: 5px; }
+        .chat-area::-webkit-scrollbar-track { background: transparent; }
+        .chat-area::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+
+        /* 웰컴 */
+        .welcome {
+            text-align: center;
+            padding: 60px 20px 40px;
+        }
+
+        .welcome-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        .welcome h2 {
+            color: #111827;
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            margin-bottom: 8px;
+        }
+
+        .welcome p {
+            color: #6b7280;
+            font-size: 14px;
+            line-height: 1.8;
+        }
+
+        /* 메시지 */
+        .msg-group {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .msg-row {
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+        }
+
+        .msg-row.user { flex-direction: row-reverse; }
+
+        .msg-avatar {
+            width: 36px; height: 36px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            flex-shrink: 0;
+        }
+
+        .msg-avatar.bot { background: #1a3a6b; }
+        .msg-avatar.user { background: #374151; }
+
+        .msg-content { max-width: 68%; }
+
+        .msg-name {
+            font-size: 11px;
+            font-weight: 600;
+            color: #9ca3af;
+            margin-bottom: 5px;
+            padding: 0 4px;
+        }
+
+        .msg-row.user .msg-name { text-align: right; }
+
+        .bubble {
+            padding: 14px 18px;
+            border-radius: 12px;
+            font-size: 14px;
+            line-height: 1.7;
+            word-break: keep-all;
+        }
+
+        .bubble.bot {
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            color: #1f2937;
+            border-radius: 4px 12px 12px 12px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+        }
+
+        .bubble.user {
+            background: #1a3a6b;
+            color: #fff;
+            border-radius: 12px 4px 12px 12px;
+        }
+
+        .sources {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid #f3f4f6;
+        }
+
+        .sources-title {
+            font-size: 11px;
+            font-weight: 600;
+            color: #9ca3af;
+            margin-bottom: 6px;
+        }
+
+        .source-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 4px 8px;
+            font-size: 11px;
+            color: #6b7280;
+            margin: 2px 3px 2px 0;
+        }
+
+        /* 로딩 */
+        .loading-dots {
+            display: flex;
+            gap: 5px;
+            padding: 4px 0;
+        }
+
+        .dot {
+            width: 7px; height: 7px;
+            background: #d1d5db;
+            border-radius: 50%;
+            animation: bounce 1.3s infinite;
+        }
+
+        .dot:nth-child(2) { animation-delay: 0.2s; }
+        .dot:nth-child(3) { animation-delay: 0.4s; }
+
+        @keyframes bounce {
+            0%, 60%, 100% { transform: translateY(0); opacity: 0.6; }
+            30% { transform: translateY(-7px); opacity: 1; }
+        }
+
+        /* 입력창 */
+        .input-bar {
+            background: #fff;
+            border-top: 1px solid #e5e7eb;
+            padding: 16px 24px;
+        }
+
+        .input-inner {
+            display: flex;
+            gap: 10px;
+            align-items: flex-end;
+            background: #f9fafb;
+            border: 1.5px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 10px 14px;
+            transition: all 0.2s;
+        }
+
+        .input-inner:focus-within {
+            border-color: #1a3a6b;
+            background: #fff;
+            box-shadow: 0 0 0 3px rgba(26,58,107,0.08);
+        }
+
+        textarea {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: #111827;
+            font-size: 14px;
+            font-family: inherit;
+            resize: none;
+            outline: none;
+            min-height: 24px;
+            max-height: 120px;
+            line-height: 1.5;
+        }
+
+        textarea::placeholder { color: #9ca3af; }
+
+        .send-btn {
+            background: #1a3a6b;
+            border: none;
+            border-radius: 8px;
+            width: 36px; height: 36px;
+            cursor: pointer;
+            color: #fff;
+            font-size: 15px;
+            transition: all 0.2s;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .send-btn:hover { background: #15306b; }
+        .send-btn:disabled { background: #d1d5db; cursor: not-allowed; }
+
+        .input-hint {
+            font-size: 11px;
+            color: #9ca3af;
+            text-align: right;
+            margin-top: 6px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 헤더 -->
+    <div class="header">
+        <div class="header-left">
+            <div class="logo">⚖️ Lex<span>AI</span></div>
+            <div class="divider-v"></div>
+            <div class="age-tag" id="ageTag">로딩 중</div>
+        </div>
+        <div class="header-right">
+            <div class="user-chip">
+                <div class="avatar-sm" id="avatarInitial">?</div>
+                <span id="userInfo">사용자</span>
+            </div>
+            <button class="logout-btn" id="logoutBtn">로그아웃</button>
+        </div>
+    </div>
+
+    <div class="main">
+        <!-- 사이드바 -->
+        <div class="sidebar">
+            <div class="sidebar-title">예시 질문</div>
+
+            <button class="example-btn" onclick="setExample(this)">
+                <span class="example-icon">📋</span>
+                <span>가압류가 무엇인가요?</span>
+            </button>
+            <button class="example-btn" onclick="setExample(this)">
+                <span class="example-icon">🚗</span>
+                <span>임의동행 거부할 수 있나요?</span>
+            </button>
+            <button class="example-btn" onclick="setExample(this)">
+                <span class="example-icon">🏠</span>
+                <span>민사소송은 어떻게 시작하나요?</span>
+            </button>
+            <button class="example-btn" onclick="setExample(this)">
+                <span class="example-icon">💰</span>
+                <span>강제집행이 무엇인가요?</span>
+            </button>
+            <button class="example-btn" onclick="setExample(this)">
+                <span class="example-icon">📄</span>
+                <span>소장 제출 시 인지 금액은?</span>
+            </button>
+
+            <div class="sidebar-divider"></div>
+
+            <div class="info-box">
+                <p>💡 <strong>맞춤 설명</strong><br>입력하신 나이에 맞게 법률 정보를 쉽게 설명해드립니다.</p>
+            </div>
+        </div>
+
+        <!-- 채팅 -->
+        <div class="chat-container">
+            <div class="chat-area" id="chatArea">
+                <div class="welcome" id="welcome">
+                    <div class="welcome-icon">⚖️</div>
+                    <h2>무엇이 궁금하신가요?</h2>
+                    <p>법률 관련 질문을 입력하시면<br>나이에 맞게 쉽게 설명해드립니다.</p>
+                </div>
+                <div class="msg-group" id="msgGroup"></div>
+            </div>
+
+            <div class="input-bar">
+                <div class="input-inner">
+                    <textarea id="question" placeholder="법률 질문을 입력하세요..." rows="1"></textarea>
+                    <button class="send-btn" id="sendBtn">➤</button>
+                </div>
+                <div class="input-hint">Enter로 전송 · Shift+Enter로 줄바꿈</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const token = localStorage.getItem('token');
+        const username = localStorage.getItem('username');
+        const ageGroupLabel = localStorage.getItem('ageGroupLabel');
+
+        if (!token) window.location.href = '/';
+
+        $('#userInfo').text(username);
+        $('#avatarInitial').text(username ? username[0].toUpperCase() : '?');
+        $('#ageTag').text(ageGroupLabel || '');
+
+        $('#logoutBtn').click(() => { localStorage.clear(); window.location.href = '/'; });
+
+        function setExample(el) {
+            const text = $(el).find('span').last().text();
+            $('#question').val(text);
+            sendMessage();
+        }
+
+        function addUserMsg(text) {
+            $('#welcome').hide();
+            const html = `
+                <div class="msg-row user">
+                    <div class="msg-avatar user">👤</div>
+                    <div class="msg-content">
+                        <div class="msg-name">${username}</div>
+                        <div class="bubble user">${text}</div>
+                    </div>
+                </div>`;
+            $('#msgGroup').append(html);
+            scrollBottom();
+        }
+
+        function addBotMsg(text, sources) {
+            let sourcesHtml = '';
+            if (sources && sources.length > 0) {
+                sourcesHtml = '<div class="sources"><div class="sources-title">📎 참고 문서</div>';
+                sources.forEach(s => {
+                    const cat = s.lawCategory || '';
+                    const type = s.docType || '';
+                    sourcesHtml += `<span class="source-chip">📄 ${cat} ${type}</span>`;
+                });
+                sourcesHtml += '</div>';
+            }
+
+            const html = `
+                <div class="msg-row bot">
+                    <div class="msg-avatar bot">⚖️</div>
+                    <div class="msg-content">
+                        <div class="msg-name">LexAI</div>
+                        <div class="bubble bot">${text.replace(/\n/g, '<br>')}${sourcesHtml}</div>
+                    </div>
+                </div>`;
+            $('#msgGroup').append(html);
+            scrollBottom();
+        }
+
+        function showLoading() {
+            const html = `
+                <div class="msg-row bot" id="loadingRow">
+                    <div class="msg-avatar bot">⚖️</div>
+                    <div class="msg-content">
+                        <div class="msg-name">LexAI</div>
+                        <div class="bubble bot">
+                            <div class="loading-dots">
+                                <div class="dot"></div>
+                                <div class="dot"></div>
+                                <div class="dot"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>`;
+            $('#msgGroup').append(html);
+            scrollBottom();
+        }
+
+        function scrollBottom() {
+            const el = document.getElementById('chatArea');
+            el.scrollTop = el.scrollHeight;
+        }
+
+        function sendMessage() {
+            const question = $('#question').val().trim();
+            if (!question) return;
+
+            addUserMsg(question);
+            $('#question').val('').css('height', 'auto');
+            $('#sendBtn').prop('disabled', true);
+            showLoading();
+
+            $.ajax({
+                url: 'http://localhost:8080/api/chat',
+                type: 'POST',
+                contentType: 'application/json',
+                headers: { 'Authorization': 'Bearer ' + token },
+                data: JSON.stringify({ question, lawCategory: null }),
+                success: function (res) {
+                    $('#loadingRow').remove();
+                    addBotMsg(res.answer, res.sources);
+                    $('#sendBtn').prop('disabled', false);
+                },
+                error: function (err) {
+                    $('#loadingRow').remove();
+                    if (err.status === 401) { localStorage.clear(); window.location.href = '/'; }
+                    else addBotMsg('오류가 발생했습니다. 다시 시도해주세요.');
+                    $('#sendBtn').prop('disabled', false);
+                }
+            });
+        }
+
+        $('#sendBtn').click(sendMessage);
+
+        $('#question').keydown(function (e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        $('#question').on('input', function () {
+            this.style.height = 'auto';
+            this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+        });
+    </script>
+</body>
+</html>
