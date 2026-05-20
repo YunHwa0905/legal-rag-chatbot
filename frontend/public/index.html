@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LexAI - 법률 AI 상담 서비스</title>
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Noto Sans KR', sans-serif;
+            background: #f4f6f9;
+            min-height: 100vh;
+            display: flex;
+        }
+
+        /* 좌측 브랜딩 패널 */
+        .brand-panel {
+            width: 480px;
+            background: linear-gradient(145deg, #1a3a6b 0%, #0f2447 60%, #091b38 100%);
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 48px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .brand-panel::before {
+            content: '';
+            position: absolute;
+            top: -100px; right: -100px;
+            width: 400px; height: 400px;
+            background: rgba(255,255,255,0.04);
+            border-radius: 50%;
+        }
+
+        .brand-panel::after {
+            content: '';
+            position: absolute;
+            bottom: -80px; left: -80px;
+            width: 300px; height: 300px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 50%;
+        }
+
+        .brand-logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            z-index: 1;
+        }
+
+        .brand-icon {
+            width: 44px; height: 44px;
+            background: rgba(255,255,255,0.12);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+        }
+
+        .brand-name {
+            color: #fff;
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+
+        .brand-name span { color: #7eb3ff; }
+
+        .brand-content { z-index: 1; }
+
+        .brand-content h2 {
+            color: #fff;
+            font-size: 32px;
+            font-weight: 700;
+            line-height: 1.4;
+            letter-spacing: -0.5px;
+            margin-bottom: 16px;
+        }
+
+        .brand-content p {
+            color: rgba(255,255,255,0.6);
+            font-size: 15px;
+            line-height: 1.8;
+        }
+
+        .feature-list {
+            margin-top: 36px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            z-index: 1;
+        }
+
+        .feature-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            color: rgba(255,255,255,0.8);
+            font-size: 13px;
+        }
+
+        .feature-dot {
+            width: 6px; height: 6px;
+            background: #7eb3ff;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .brand-footer {
+            color: rgba(255,255,255,0.3);
+            font-size: 12px;
+            z-index: 1;
+        }
+
+        /* 우측 로그인 폼 */
+        .form-panel {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 48px;
+        }
+
+        .form-box {
+            width: 100%;
+            max-width: 420px;
+        }
+
+        .form-header {
+            margin-bottom: 36px;
+        }
+
+        .form-header h1 {
+            color: #111827;
+            font-size: 26px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+        }
+
+        .form-header p {
+            color: #6b7280;
+            font-size: 14px;
+            margin-top: 6px;
+        }
+
+        .form-group {
+            margin-bottom: 18px;
+        }
+
+        label {
+            display: block;
+            color: #374151;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 7px;
+        }
+
+        input {
+            width: 100%;
+            background: #fff;
+            border: 1.5px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 12px 16px;
+            color: #111827;
+            font-size: 14px;
+            font-family: inherit;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        input:focus {
+            border-color: #1a3a6b;
+            box-shadow: 0 0 0 3px rgba(26,58,107,0.08);
+        }
+
+        input::placeholder { color: #9ca3af; }
+
+        .btn-primary {
+            width: 100%;
+            background: #1a3a6b;
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            padding: 13px;
+            font-size: 15px;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            margin-top: 8px;
+            transition: all 0.2s;
+            letter-spacing: -0.2px;
+        }
+
+        .btn-primary:hover { background: #15306b; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(26,58,107,0.25); }
+        .btn-primary:active { transform: translateY(0); }
+
+        .msg {
+            text-align: center;
+            font-size: 13px;
+            margin-top: 12px;
+            min-height: 18px;
+            padding: 8px 12px;
+            border-radius: 8px;
+        }
+
+        .msg.error { color: #dc2626; background: #fef2f2; }
+        .msg.success { color: #16a34a; background: #f0fdf4; }
+
+        .divider {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin: 24px 0;
+            color: #9ca3af;
+            font-size: 12px;
+        }
+
+        .divider::before, .divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: #e5e7eb;
+        }
+
+        .signup-link {
+            text-align: center;
+            color: #6b7280;
+            font-size: 14px;
+        }
+
+        .signup-link a {
+            color: #1a3a6b;
+            font-weight: 600;
+            text-decoration: none;
+        }
+
+        .signup-link a:hover { text-decoration: underline; }
+
+        @media (max-width: 768px) {
+            .brand-panel { display: none; }
+            .form-panel { padding: 24px; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="brand-panel">
+        <div class="brand-logo">
+            <div class="brand-icon">⚖️</div>
+            <div class="brand-name">Lex<span>AI</span></div>
+        </div>
+
+        <div class="brand-content">
+            <h2>복잡한 법률,<br>쉽게 이해하세요</h2>
+            <p>AI가 나이와 상황에 맞게<br>법률 정보를 맞춤 설명해드립니다.</p>
+            <div class="feature-list">
+                <div class="feature-item"><div class="feature-dot"></div>나이대별 맞춤형 법률 설명</div>
+                <div class="feature-item"><div class="feature-dot"></div>AIHub 법률 데이터 기반 정확한 정보</div>
+                <div class="feature-item"><div class="feature-dot"></div>민사법 · 형사법 · 행정법 · 지식재산권법</div>
+            </div>
+        </div>
+
+        <div class="brand-footer">© 2024 LexAI. All rights reserved.</div>
+    </div>
+
+    <div class="form-panel">
+        <div class="form-box">
+            <div class="form-header">
+                <h1>로그인</h1>
+                <p>서비스를 이용하려면 로그인이 필요합니다</p>
+            </div>
+
+            <div class="form-group">
+                <label>아이디</label>
+                <input type="text" id="username" placeholder="아이디를 입력하세요">
+            </div>
+            <div class="form-group">
+                <label>비밀번호</label>
+                <input type="password" id="password" placeholder="비밀번호를 입력하세요">
+            </div>
+
+            <button class="btn-primary" id="loginBtn">로그인</button>
+            <div class="msg" id="msg" style="display:none"></div>
+
+            <div class="divider">또는</div>
+
+            <div class="signup-link">
+                아직 계정이 없으신가요? <a href="/signup.html">회원가입하기</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        $('#loginBtn').click(function () {
+            const username = $('#username').val().trim();
+            const password = $('#password').val().trim();
+
+            if (!username || !password) {
+                showMsg('아이디와 비밀번호를 입력하세요.', 'error');
+                return;
+            }
+
+            $(this).text('로그인 중...').prop('disabled', true);
+
+            $.ajax({
+                url: 'http://localhost:8080/api/auth/login',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ username, password }),
+                success: function (res) {
+                    localStorage.setItem('token', res.token);
+                    localStorage.setItem('username', res.username);
+                    localStorage.setItem('age', res.age);
+                    localStorage.setItem('ageGroupLabel', res.ageGroupLabel);
+                    window.location.href = '/chat.html';
+                },
+                error: function (err) {
+                    showMsg(err.responseText || '로그인에 실패했습니다.', 'error');
+                    $('#loginBtn').text('로그인').prop('disabled', false);
+                }
+            });
+        });
+
+        function showMsg(text, type) {
+            $('#msg').text(text).attr('class', 'msg ' + type).show();
+        }
+
+        $('input').keypress(function (e) {
+            if (e.which === 13) $('#loginBtn').click();
+        });
+    </script>
+</body>
+</html>
