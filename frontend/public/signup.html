@@ -236,7 +236,7 @@
             $(this).text('처리 중...').prop('disabled', true);
 
             $.ajax({
-                url: 'http://localhost:8080/api/auth/signup',
+                url: 'http://localhost:8181/backend_spring/api/auth/signup',
                 type: 'POST',
                 contentType: 'application/json',
                 data: JSON.stringify({ username, password, age }),
