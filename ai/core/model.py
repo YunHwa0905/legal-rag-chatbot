@@ -58,9 +58,9 @@ def load_model():
         settings.MODEL_NAME,
         quantization_config=_get_bnb_config(),
         device_map="auto",
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,          # EXAONE 필수
-        attn_implementation="eager",
+        dtype=torch.bfloat16,            # torch_dtype → dtype (신버전 transformers)
+        trust_remote_code=True,
+        attn_implementation="eager",     # Windows는 flash_attention_2 미지원
         token=settings.HF_TOKEN if settings.HF_TOKEN else None,
     )
 
