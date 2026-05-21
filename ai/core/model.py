@@ -1,10 +1,11 @@
 """
-Gemma 모델 로드 & 추론 모듈
+EXAONE-3.5-7.8B 모델 로드 & 추론 모듈
 
-역할:
-- HuggingFace에서 Gemma 모델 로드
-- QLoRA(4bit) 양자화로 VRAM 절약
-- 나이대별 프롬프트 기반 답변 생성
+변경사항:
+- 모델: gemma-3-4b-it → EXAONE-3.5-7.8B-Instruct
+- trust_remote_code=True 추가 (EXAONE 필수)
+- system 역할 분리 (EXAONE chat template 지원)
+- double_quant=True로 VRAM 절약
 """
 
 import sys
@@ -31,8 +32,8 @@ def _get_bnb_config() -> BitsAndBytesConfig:
     return BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,  # float16 → bfloat16
-        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,  # VRAM 추가 절약
     )
 
 
@@ -46,6 +47,7 @@ def load_model():
 
     _tokenizer = AutoTokenizer.from_pretrained(
         settings.MODEL_NAME,
+        trust_remote_code=True,          # EXAONE 필수
         token=settings.HF_TOKEN if settings.HF_TOKEN else None,
     )
 
@@ -57,7 +59,8 @@ def load_model():
         quantization_config=_get_bnb_config(),
         device_map="auto",
         torch_dtype=torch.bfloat16,
-        attn_implementation="eager",   # ← 이거 추가
+        trust_remote_code=True,          # EXAONE 필수
+        attn_implementation="eager",
         token=settings.HF_TOKEN if settings.HF_TOKEN else None,
     )
 
@@ -74,8 +77,10 @@ def generate(
 ) -> str:
     model, tokenizer = load_model()
 
+    # EXAONE은 system 역할을 별도로 지원
     messages = [
-        {"role": "user", "content": f"{system_prompt}\n\n{user_message}"}
+        {"role": "system",    "content": system_prompt},
+        {"role": "user",      "content": user_message},
     ]
 
     try:
@@ -85,7 +90,12 @@ def generate(
             add_generation_prompt=True,
         )
     except Exception:
-        prompt = f"{system_prompt}\n\n{user_message}\n\n답변:"
+        # EXAONE fallback 템플릿
+        prompt = (
+            f"[|system|]{system_prompt}[|endofturn|]\n"
+            f"[|user|]{user_message}[|endofturn|]\n"
+            f"[|assistant|]"
+        )
 
     inputs = tokenizer(
         prompt,
@@ -98,25 +108,17 @@ def generate(
         outputs = model.generate(
             **inputs,
             max_new_tokens=settings.MAX_NEW_TOKENS,
-            do_sample=False,
+            do_sample=settings.DO_SAMPLE,
+            temperature=settings.TEMPERATURE if settings.DO_SAMPLE else None,
+            top_p=settings.TOP_P if settings.DO_SAMPLE else None,
             pad_token_id=tokenizer.eos_token_id,
             eos_token_id=tokenizer.eos_token_id,
             repetition_penalty=1.1,
-            temperature=None,
-            top_p=None,
-            top_k=None,
         )
 
-    # 디버그
-    input_length = inputs["input_ids"].shape[1]
+    input_length     = inputs["input_ids"].shape[1]
     generated_tokens = outputs[0][input_length:]
-    print(f"[DEBUG] input_length: {input_length}")
-    print(f"[DEBUG] output length: {len(outputs[0])}")
-    print(f"[DEBUG] generated tokens count: {len(generated_tokens)}")
-    print(f"[DEBUG] generated_tokens raw: {generated_tokens[:10]}")
-
-    answer = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-    print(f"[DEBUG] decoded answer: '{answer[:100]}'")
+    answer           = tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
     return answer.strip()
 
@@ -130,22 +132,14 @@ def test():
 상대방이 그 대금을 지급할 것을 약정함으로써 효력이 생긴다.
 계약은 원칙적으로 당사자 간의 합의만으로 성립하며, 서면이나 날인이 필수 요건은 아니다."""
 
-    test_cases = [
-        {"age": 8,  "label": "8세 (어린이)"},
-        {"age": 25, "label": "25세 (성인)"},
-    ]
-
-    for case in test_cases:
+    for age in [8, 25, 55]:
         print(f"\n{'='*50}")
-        print(f"[{case['label']}] 질문: {question}")
+        print(f"나이: {age}세")
         print(f"{'='*50}")
-
-        prompt = build_prompt(question, context, case["age"])
+        prompt = build_prompt(question, context, age)
         answer = generate(prompt["system"], prompt["user"])
-
         print(f"나이대: {prompt['age_group_label']}")
-        print(f"\n[답변]")
-        print(answer)
+        print(f"\n[답변]\n{answer}")
 
 
 if __name__ == "__main__":
