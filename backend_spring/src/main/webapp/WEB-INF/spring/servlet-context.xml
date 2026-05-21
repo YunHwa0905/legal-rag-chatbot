@@ -19,13 +19,11 @@
         </mvc:message-converters>
     </mvc:annotation-driven>
 
-    <mvc:cors>
-        <mvc:mapping path="/api/**"
-                     allowed-origins="http://localhost:3000"
-                     allowed-methods="GET,POST,PUT,DELETE,OPTIONS"
-                     allowed-headers="*"
-                     allow-credentials="true"/>
-    </mvc:cors>
+    <!--
+        CORS 는 web.xml 에 등록된 SimpleCorsFilter 가 전담합니다.
+        mvc:cors 와 SimpleCorsFilter 가 공존하면 헤더가 중복 설정되어
+        브라우저가 CORS 오류를 낼 수 있으므로 여기서는 선언하지 않습니다.
+    -->
 
     <mvc:default-servlet-handler/>
 

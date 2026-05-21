@@ -100,6 +100,17 @@
             <scope>provided</scope>
         </dependency>
 
+        <!--
+            @PostConstruct / @PreDestroy 지원
+            Java 11에서는 javax.annotation이 JDK에서 제거됐으므로
+            명시적으로 추가해야 @PostConstruct가 동작합니다.
+        -->
+        <dependency>
+            <groupId>javax.annotation</groupId>
+            <artifactId>javax.annotation-api</artifactId>
+            <version>1.3.2</version>
+        </dependency>
+
         <!-- Lombok -->
         <dependency>
             <groupId>org.projectlombok</groupId>
@@ -139,14 +150,19 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-war-plugin</artifactId>
                 <version>3.3.2</version>
+                <configuration>
+                    <!-- web.xml 없이도 빌드 가능하게 (혹시 모를 오류 방지) -->
+                    <failOnMissingWebXml>false</failOnMissingWebXml>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.tomcat.maven</groupId>
                 <artifactId>tomcat7-maven-plugin</artifactId>
                 <version>2.2</version>
                 <configuration>
-                    <port>8081</port>
-                    <path>/</path>
+                    <!-- 프론트 HTML에서 호출하는 포트와 동일하게 8181로 통일 -->
+                    <port>8181</port>
+                    <path>/backend_spring</path>
                     <uriEncoding>UTF-8</uriEncoding>
                 </configuration>
             </plugin>
