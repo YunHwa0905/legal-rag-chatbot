@@ -1,128 +1,99 @@
 """
-EXAONE-3.5-7.8B 모델 로드 & 추론 모듈
+Ollama 기반 추론 모듈
 
 변경사항:
-- 모델: gemma-3-4b-it → EXAONE-3.5-7.8B-Instruct
-- trust_remote_code=True 추가 (EXAONE 필수)
-- system 역할 분리 (EXAONE chat template 지원)
-- double_quant=True로 VRAM 절약
+- 기존: transformers로 모델 직접 로드 (16GB VRAM 점유)
+- 변경: Ollama API 호출 방식 (메모리 효율, 빠른 시작)
+
+Ollama 실행 필요:
+- ollama run legal-exaone 으로 모델 실행 중이어야 함
+- 기본 주소: http://localhost:11434
 """
 
 import sys
 import os
-import torch
+import requests
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from transformers import (
-    AutoTokenizer,
-    AutoModelForCausalLM,
-    BitsAndBytesConfig,
-)
 from core.config import settings
 
 
 # ===========================
-# 모델 싱글톤 관리
+# Ollama 설정
 # ===========================
-_model = None
-_tokenizer = None
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "legal-exaone")
 
 
-def _get_bnb_config() -> BitsAndBytesConfig:
-    return BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,  # VRAM 추가 절약
-    )
+# ===========================
+# Ollama 상태 확인
+# ===========================
+def check_ollama() -> bool:
+    try:
+        res = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=3)
+        return res.status_code == 200
+    except Exception:
+        return False
 
 
-def load_model():
-    global _model, _tokenizer
-
-    if _model is not None:
-        return _model, _tokenizer
-
-    print(f"[INFO] 모델 로드 중: {settings.MODEL_NAME}")
-
-    _tokenizer = AutoTokenizer.from_pretrained(
-        settings.MODEL_NAME,
-        trust_remote_code=True,          # EXAONE 필수
-        token=settings.HF_TOKEN if settings.HF_TOKEN else None,
-    )
-
-    if _tokenizer.pad_token is None:
-        _tokenizer.pad_token = _tokenizer.eos_token
-
-    _model = AutoModelForCausalLM.from_pretrained(
-        settings.MODEL_NAME,
-        quantization_config=_get_bnb_config(),
-        device_map="auto",
-        dtype=torch.bfloat16,            # torch_dtype → dtype (신버전 transformers)
-        trust_remote_code=True,
-        attn_implementation="eager",     # Windows는 flash_attention_2 미지원
-        token=settings.HF_TOKEN if settings.HF_TOKEN else None,
-    )
-
-    _model.eval()
-    print(f"[SUCCESS] 모델 로드 완료")
-    print(f"[INFO] 사용 디바이스: {next(_model.parameters()).device}")
-
-    return _model, _tokenizer
-
-
+# ===========================
+# 추론 함수
+# ===========================
 def generate(
     system_prompt: str,
     user_message: str,
 ) -> str:
-    model, tokenizer = load_model()
-
-    # EXAONE은 system 역할을 별도로 지원
-    messages = [
-        {"role": "system",    "content": system_prompt},
-        {"role": "user",      "content": user_message},
-    ]
-
-    try:
-        prompt = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-    except Exception:
-        # EXAONE fallback 템플릿
-        prompt = (
-            f"[|system|]{system_prompt}[|endofturn|]\n"
-            f"[|user|]{user_message}[|endofturn|]\n"
-            f"[|assistant|]"
+    if not check_ollama():
+        raise RuntimeError(
+            f"Ollama 서버에 연결할 수 없습니다: {OLLAMA_BASE_URL}\n"
+            f"'ollama run {OLLAMA_MODEL}' 명령어로 모델을 먼저 실행해주세요."
         )
 
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=4096,
-    ).to(model.device)
+    response = requests.post(
+        f"{OLLAMA_BASE_URL}/api/chat",
+        json={
+            "model": OLLAMA_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_message},
+            ],
+            "stream": False,
+            "options": {
+                "temperature":      settings.TEMPERATURE,
+                "top_p":            settings.TOP_P,
+                "num_predict":      settings.MAX_NEW_TOKENS,
+                "repeat_penalty":   1.1,
+                "num_ctx":          4096,
+            },
+        },
+        timeout=300,  # 법률 답변은 길 수 있으므로 5분 타임아웃
+    )
 
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=settings.MAX_NEW_TOKENS,
-            do_sample=settings.DO_SAMPLE,
-            temperature=settings.TEMPERATURE if settings.DO_SAMPLE else None,
-            top_p=settings.TOP_P if settings.DO_SAMPLE else None,
-            pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            repetition_penalty=1.1,
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Ollama API 오류 ({response.status_code}): {response.text}"
         )
 
-    input_length     = inputs["input_ids"].shape[1]
-    generated_tokens = outputs[0][input_length:]
-    answer           = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-
-    return answer.strip()
+    return response.json()["message"]["content"].strip()
 
 
+# ===========================
+# 하위 호환성 유지
+# (기존 load_model() 호출 코드가 있을 경우 대비)
+# ===========================
+def load_model():
+    if not check_ollama():
+        raise RuntimeError(
+            f"Ollama 서버 미실행: {OLLAMA_BASE_URL}\n"
+            f"'ollama run {OLLAMA_MODEL}' 먼저 실행하세요."
+        )
+    print(f"[INFO] Ollama 모델 사용 중: {OLLAMA_MODEL} @ {OLLAMA_BASE_URL}")
+    return None, None
+
+
+# ===========================
+# 테스트
+# ===========================
 def test():
     from prompt.template import build_prompt
 
@@ -131,6 +102,9 @@ def test():
 민법 제563조에 따르면 매매계약은 당사자 일방이 재산권을 상대방에게 이전할 것을 약정하고,
 상대방이 그 대금을 지급할 것을 약정함으로써 효력이 생긴다.
 계약은 원칙적으로 당사자 간의 합의만으로 성립하며, 서면이나 날인이 필수 요건은 아니다."""
+
+    print(f"[INFO] Ollama 상태: {'정상' if check_ollama() else '연결 불가'}")
+    print(f"[INFO] 사용 모델: {OLLAMA_MODEL}")
 
     for age in [8, 25, 55]:
         print(f"\n{'='*50}")
