@@ -13,11 +13,22 @@ class Settings(BaseSettings):
 
     # ===========================
     # EXAONE 모델 설정
-    # 파인튜닝 완료 후: yunhwa/legal_chatbot_exaone 으로 변경
     # ===========================
     MODEL_NAME: str = "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct"
     MODEL_LOCAL_PATH: str = "./models/exaone"
     HF_TOKEN: str = ""
+
+    # ===========================
+    # HuggingFace 설정
+    # ===========================
+    HF_MODEL_REPO: str = "yunhwa/legal_chatbot_exaone"
+    HF_DATASET_REPO: str = "yunhwa/legal-rag-train"
+
+    # ===========================
+    # Ollama 설정
+    # ===========================
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "legal-exaone"
 
     # ===========================
     # 임베딩 모델 설정
@@ -37,8 +48,6 @@ class Settings(BaseSettings):
 
     # ===========================
     # RAG 설정
-    # MIN_SCORE: 0.7 → 0.5 (너무 높으면 검색 결과 0건 빈번)
-    # TOP_K: 3 → 5 (법률은 관련 조문 여러 개 필요)
     # ===========================
     RAG_TOP_K: int = 5
     RAG_MIN_SCORE: float = 0.5
@@ -47,8 +56,6 @@ class Settings(BaseSettings):
 
     # ===========================
     # 모델 추론 설정
-    # MAX_NEW_TOKENS: 512 → 768 (법률 설명이 중간에 끊기는 문제 방지)
-    # DO_SAMPLE: True (EXAONE은 샘플링이 더 자연스러운 답변 생성)
     # ===========================
     MAX_NEW_TOKENS: int = 768
     TEMPERATURE: float = 0.1
