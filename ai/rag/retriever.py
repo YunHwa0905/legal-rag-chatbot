@@ -171,7 +171,34 @@ class LegalRetriever:
         return results
 
     # ===========================
-    # 컨텍스트 텍스트 생성 (300자 → 500자)
+    # 오염 텍스트 정제
+    # ===========================
+    def _clean_text(self, text: str) -> str:
+        print(f"[DEBUG] clean_text 호출됨, 원본 앞 50자: {text[:50]}")
+
+        
+        """Q: 로 시작하는 질문 부분 제거, 오염 패턴 필터링"""
+        import re
+        # Q: 로 시작하는 줄 제거 (질문 자체가 컨텍스트에 섞이는 문제)
+        lines = text.split("\n")
+        cleaned = []
+        for line in lines:
+            line = line.strip()
+            # Q: 로 시작하는 줄 제거
+            if line.startswith("Q:"):
+                continue
+            # 오염 패턴 제거
+            noise_patterns = [
+                "쉽게 설명해주세요", "예시를 들어", "일상생활에서 어떻게",
+                "간단히 설명", "쉽고 간단한", "_PAGEVIEW_COUNT_",
+            ]
+            if any(p in line for p in noise_patterns):
+                continue
+            cleaned.append(line)
+        return "\n".join(cleaned).strip()
+
+    # ===========================
+    # 컨텍스트 텍스트 생성
     # ===========================
     def get_context(self, query: str, law_category: str = None) -> str:
         results = self.search(query, law_category)
@@ -181,9 +208,11 @@ class LegalRetriever:
 
         context_parts = []
         for i, doc in enumerate(results, 1):
+            # 오염 텍스트 정제 후 500자 제한
+            clean = self._clean_text(doc['text'])[:500]
             context_parts.append(
                 f"[문서 {i}] ({doc['law_category']} - {doc['doc_type']})\n"
-                f"{doc['text'][:500]}\n"
+                f"{clean}\n"
                 f"출처: {doc['source']}"
             )
 
