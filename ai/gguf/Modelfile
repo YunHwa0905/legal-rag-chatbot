@@ -4,5 +4,3 @@ PARAMETER temperature 0.1
 PARAMETER top_p 0.9
 PARAMETER num_ctx 4096
 PARAMETER repeat_penalty 1.1
-
-SYSTEM """당신은 한국 법률 전문 AI 어시스턴트입니다. 정확하고 신뢰할 수 있는 법률 정보를 제공하세요."""

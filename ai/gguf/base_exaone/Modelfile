@@ -1,0 +1,6 @@
+FROM C:\Users\SMT21\Desktop\legal-rag-chatbot\ai\gguf\base_exaone\EXAONE-3.5-7.8B-Instruct-Q8_0.gguf
+
+PARAMETER temperature 0.1
+PARAMETER top_p 0.9
+PARAMETER num_ctx 4096
+PARAMETER repeat_penalty 1.1

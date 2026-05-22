@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # 모델 추론 설정
     # ===========================
     MAX_NEW_TOKENS: int = 768
-    TEMPERATURE: float = 0.1
+    TEMPERATURE: float = 0.7
     TOP_P: float = 0.9
     DO_SAMPLE: bool = True
 
