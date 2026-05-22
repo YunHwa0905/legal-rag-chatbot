@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     # ===========================
     # EXAONE 모델 설정
     # ===========================
-    MODEL_NAME: str = "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct"
+    MODEL_NAME: str = "yunhwa/legal_chatbot"
     MODEL_LOCAL_PATH: str = "./models/exaone"
     HF_TOKEN: str = ""
 
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # Ollama 설정
     # ===========================
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "legal-exaone"
+    OLLAMA_MODEL: str = "legal-gemma"
 
     # ===========================
     # 임베딩 모델 설정
@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # 모델 추론 설정
     # ===========================
     MAX_NEW_TOKENS: int = 768
-    TEMPERATURE: float = 0.7
+    TEMPERATURE: float = 0.1
     TOP_P: float = 0.9
     DO_SAMPLE: bool = True
 
