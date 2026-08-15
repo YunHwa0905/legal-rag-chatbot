@@ -1,6 +1,18 @@
-FROM C:\Users\SMT21\Desktop\legal-rag-chatbot\ai\gguf\base_exaone\EXAONE-3.5-7.8B-Instruct-Q8_0.gguf
-
+FROM F:\workspce\legal-rag-chatbot\ai\gguf\base_exaone\EXAONE-3.5-7.8B-Instruct-Q8_0.gguf
 PARAMETER temperature 0.1
 PARAMETER top_p 0.9
 PARAMETER num_ctx 4096
 PARAMETER repeat_penalty 1.1
+PARAMETER stop "[|endofturn|]"
+
+TEMPLATE """{{- range $i, $_ := .Messages }}
+{{- $last := eq (len (slice $.Messages $i)) 1 -}}
+{{ if eq .Role "system" }}[|system|]{{ .Content }}[|endofturn|]
+{{ continue }}
+{{ else if eq .Role "user" }}[|user|]{{ .Content }}
+{{ else if eq .Role "assistant" }}[|assistant|]{{ .Content }}[|endofturn|]
+{{ end }}
+{{- if and (ne .Role "assistant") $last }}[|assistant|]{{ end }}
+{{- end -}}"""
+
+SYSTEM """당신은 한국 법률 전문 AI 어시스턴트입니다."""

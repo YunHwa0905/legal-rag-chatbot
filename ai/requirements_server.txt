@@ -1,0 +1,22 @@
+# ===========================
+# FastAPI 서버용 requirements
+# 학습 관련 패키지 제거 (서버에서 불필요)
+# Ollama API 방식이라 torch/transformers 불필요
+# ===========================
+
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+httpx==0.27.0
+python-dotenv==1.0.1
+pydantic-settings==2.4.0
+
+# RAG 검색
+sentence-transformers==3.0.1
+opensearch-py==2.7.1
+
+# 유틸
+pandas==2.2.2
+numpy==1.26.4
+tqdm==4.66.5
+requests==2.31.0

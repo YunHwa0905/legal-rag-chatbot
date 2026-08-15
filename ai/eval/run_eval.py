@@ -1,0 +1,95 @@
+"""
+최소 RAG 평가 스크립트
+
+사용법:
+    cd ai
+    python eval/run_eval.py
+
+자동으로 측정되는 것 (검색 품질):
+    - category_match_rate : 검색된 문서의 law_category가 질문의 기대 분야와 일치하는 비율
+    - avg_retrieval_score : 하이브리드 검색 점수 평균
+    - latency_sec         : 질문당 응답 시간
+
+자동으로 측정되지 않는 것 (results/*.json에 answer로 남겨두고 사람이 채점):
+    - 답변의 사실 정확성
+    - 나이대에 맞는 말투/난이도 준수 여부
+    - 환각(hallucination) 여부
+"""
+
+import sys
+import os
+import json
+import time
+from datetime import datetime
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from rag.pipeline import get_pipeline
+
+EVAL_SET_PATH = os.path.join(os.path.dirname(__file__), "eval_set.json")
+RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
+
+
+def run():
+    with open(EVAL_SET_PATH, encoding="utf-8") as f:
+        cases = json.load(f)
+
+    pipeline = get_pipeline()
+    results = []
+
+    for case in cases:
+        print(f"\n[{case['id']}] {case['question']} (age={case['age']})")
+
+        start = time.time()
+        result = pipeline.run(question=case["question"], age=case["age"])
+        elapsed = round(time.time() - start, 2)
+
+        sources = result["sources"]
+        category_hits = sum(
+            1 for s in sources if case["expected_category"] in s["law_category"]
+        )
+        category_match_rate = (category_hits / len(sources)) if sources else 0.0
+        avg_score = (sum(s["score"] for s in sources) / len(sources)) if sources else 0.0
+
+        record = {
+            "id": case["id"],
+            "question": case["question"],
+            "age": case["age"],
+            "expected_category": case["expected_category"],
+            "age_group_label": result["age_group_label"],
+            "answer": result["answer"],
+            "num_sources": len(sources),
+            "category_match_rate": round(category_match_rate, 2),
+            "avg_retrieval_score": round(avg_score, 4),
+            "latency_sec": elapsed,
+            "sources": sources,
+            # 사람이 채점해서 채워 넣는 칸 (1~5점 또는 pass/fail)
+            "manual_score": {
+                "factual_correctness": None,
+                "age_appropriate_tone": None,
+                "hallucination_free": None,
+            },
+        }
+        results.append(record)
+
+        print(f"  검색결과 {len(sources)}건 / 분야일치율 {record['category_match_rate']:.0%} / {elapsed}s")
+
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    out_path = os.path.join(
+        RESULTS_DIR, f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    )
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+
+    n = len(results)
+    print(f"\n{'=' * 50}")
+    print(f"총 {n}건 평가 완료 → {out_path}")
+    print(f"평균 분야일치율: {sum(r['category_match_rate'] for r in results) / n:.0%}")
+    print(f"평균 검색점수:   {sum(r['avg_retrieval_score'] for r in results) / n:.4f}")
+    print(f"평균 응답시간:   {sum(r['latency_sec'] for r in results) / n:.1f}s")
+    print(f"{'=' * 50}")
+    print("→ 결과 파일의 manual_score 항목을 채워서 답변 품질을 사람이 채점하세요.")
+
+
+if __name__ == "__main__":
+    run()

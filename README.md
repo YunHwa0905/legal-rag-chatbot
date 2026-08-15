@@ -2,6 +2,15 @@
 
 > **Lex** (라틴어: 법) + **AI** — 누구나 이해할 수 있는 법률 상담 챗봇
 
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688?style=flat-square&logo=fastapi&logoColor=white)
+![Spring](https://img.shields.io/badge/Spring_Legacy-5.x-6DB33F?style=flat-square&logo=spring&logoColor=white)
+![Java](https://img.shields.io/badge/Java-17-ED8B00?style=flat-square&logo=openjdk&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-18+-339933?style=flat-square&logo=node.js&logoColor=white)
+![MySQL](https://img.shields.io/badge/MySQL-8.0-4479A1?style=flat-square&logo=mysql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-OpenSearch-2496ED?style=flat-square&logo=docker&logoColor=white)
+![Ollama](https://img.shields.io/badge/Ollama-Gemma3_4B-000000?style=flat-square&logo=ollama&logoColor=white)
+
 ---
 
 ## 📌 프로젝트 개요
@@ -91,6 +100,50 @@ LexAI는 사용자의 **나이대에 맞는 언어**로 법률 질문에 답변�
 
 ---
 
+## 📁 프로젝트 구조
+
+```
+legal-rag-chatbot/
+├── ai/                             # FastAPI AI 서버
+│   ├── main.py                     # 앱 진입점
+│   ├── api/
+│   │   ├── router.py               # /chat 엔드포인트
+│   │   └── schemas.py              # 요청·응답 스키마
+│   ├── core/
+│   │   ├── config.py               # 환경 설정
+│   │   └── model.py                # Ollama 모델 연동
+│   ├── rag/
+│   │   ├── pipeline.py             # RAG 파이프라인
+│   │   └── retriever.py            # BM25 + kNN 하이브리드 검색
+│   ├── prompt/
+│   │   └── template.py             # 나이대별 프롬프트 분기
+│   ├── indexing/
+│   │   ├── index_builder.py        # OpenSearch 인덱싱
+│   │   └── loader.py               # 데이터 로더
+│   ├── data/
+│   │   └── preprocess.py           # AIHub 데이터 전처리
+│   └── requirements.txt
+├── backend_spring/                 # Spring Legacy 백엔드
+│   ├── src/main/java/com/legal/backend/
+│   │   ├── controller/             # AuthController, ChatController
+│   │   ├── service/                # AuthService, ChatService
+│   │   ├── dao/                    # UserDao (MyBatis)
+│   │   ├── dto/                    # 요청·응답 DTO
+│   │   ├── entity/                 # User
+│   │   ├── filter/                 # JwtFilter, SimpleCorsFilter
+│   │   └── util/                   # JwtUtil
+│   └── pom.xml
+├── frontend/                       # Node.js + Express 프론트엔드
+│   ├── public/
+│   │   ├── index.html              # 로그인
+│   │   ├── signup.html             # 회원가입
+│   │   └── chat.html               # 채팅 UI
+│   └── server.js
+└── README.md
+```
+
+---
+
 ## 📁 브랜치 구조
 
 ```
@@ -177,6 +230,24 @@ node server.js
 
 ---
 
+## 🖥️ 개발 환경
+
+| 항목 | 버전 / 내용 |
+|------|------------|
+| OS | Windows 11 / Ubuntu 22.04 (서버 배포) |
+| Python | 3.11 |
+| JDK | 17 |
+| Node.js | 18+ |
+| Spring Framework | 5.x (Legacy MVC) |
+| Maven | 3.9+ |
+| Docker | 24+ |
+| OpenSearch | 2.13.0 (Docker) |
+| Ollama | 최신 (Gemma3:4b 모델) |
+| IDE | STS 4 (Spring), VS Code (AI·Frontend) |
+| DB Client | MySQL Workbench 8.0 |
+
+---
+
 ## ✅ 구현 완료 목록
 
 - [x] AIHub 법률 데이터 전처리 및 OpenSearch 인덱싱 (206,950건)
@@ -209,6 +280,20 @@ node server.js
 | 분석모델정의서 | 시스템 구조, RAG 파이프라인, 나이대별 프롬프트 상세 |
 | 화면정의서 | 로그인 / 회원가입 / 채팅 화면 UI 명세 |
 | 테이블 정의서 | MySQL users 테이블, OpenSearch legal_docs 인덱스 |
+
+---
+
+## 📚 학습 내용
+
+| 분야 | 핵심 학습 내용 |
+|------|--------------|
+| RAG | BM25 + kNN 하이브리드 검색 구조 설계, OpenSearch 인덱스 매핑 및 쿼리 최적화 |
+| LLM 서빙 | Gemma 3 4B GGUF 변환 및 Ollama API 연동, 스트리밍 응답 처리 |
+| 파인튜닝 | QLoRA 4bit 파인튜닝, Alpaca 포맷 학습 데이터 구성 (AIHub → finetune JSON) |
+| 임베딩 | `jhgan/ko-sroberta-multitask` 한국어 임베딩, 벡터 유사도 검색 |
+| Spring Legacy | MyBatis SQL 매핑, JWT 필터 체인, SimpleCorsFilter 직접 구현 |
+| 시스템 설계 | Frontend → Spring → FastAPI 3계층 프록시 아키텍처 |
+| 배포 | 리눅스 서버 포트 오픈, 멀티 프로세스 동시 실행 (`screen` / `nohup`) |
 
 ---
 
