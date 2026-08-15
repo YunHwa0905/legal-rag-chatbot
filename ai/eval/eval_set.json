@@ -1,0 +1,21 @@
+[
+  { "id": "civ-child",   "expected_category": "민사", "age": 8,  "question": "친구랑 게임 아이템 바꾸기로 약속했는데 친구가 안 바꿔주면 어떻게 해요?" },
+  { "id": "civ-teen",    "expected_category": "민사", "age": 15, "question": "온라인에서 물건을 샀는데 환불을 안 해주면 어떻게 해야 하나요?" },
+  { "id": "civ-adult",   "expected_category": "민사", "age": 28, "question": "전세보증금을 돌려받지 못하고 있는데 어떻게 대응해야 하나요?" },
+  { "id": "civ-senior",  "expected_category": "민사", "age": 50, "question": "임차인이 계약 종료 후에도 퇴거하지 않을 경우 명도소송 절차는 어떻게 되나요?" },
+
+  { "id": "crim-child",  "expected_category": "형사", "age": 8,  "question": "친구 물건을 몰래 가져가면 어떻게 되나요?" },
+  { "id": "crim-teen",   "expected_category": "형사", "age": 15, "question": "학교 폭력을 신고하면 가해자는 어떤 처벌을 받나요?" },
+  { "id": "crim-adult",  "expected_category": "형사", "age": 28, "question": "명예훼손으로 고소하려면 어떤 절차를 거쳐야 하나요?" },
+  { "id": "crim-senior", "expected_category": "형사", "age": 50, "question": "정당방위가 인정되는 요건과 판단 기준은 무엇인가요?" },
+
+  { "id": "admin-child",  "expected_category": "행정", "age": 8,  "question": "학교에서 정한 규칙이 이상하면 바꿔달라고 할 수 있어요?" },
+  { "id": "admin-teen",   "expected_category": "행정", "age": 15, "question": "미성년자도 정보공개청구를 할 수 있나요?" },
+  { "id": "admin-adult",  "expected_category": "행정", "age": 28, "question": "행정기관의 처분에 이의가 있을 때 행정심판과 행정소송 중 무엇을 먼저 해야 하나요?" },
+  { "id": "admin-senior", "expected_category": "행정", "age": 50, "question": "영업정지 처분에 대한 집행정지 신청 요건은 무엇인가요?" },
+
+  { "id": "const-child",  "expected_category": "헌법", "age": 8,  "question": "누구나 하고 싶은 말을 자유롭게 할 수 있는 게 맞아요?" },
+  { "id": "const-teen",   "expected_category": "헌법", "age": 15, "question": "학생도 표현의 자유가 있나요?" },
+  { "id": "const-adult",  "expected_category": "헌법", "age": 28, "question": "직업선택의 자유가 법률로 제한될 수 있는 경우는 무엇인가요?" },
+  { "id": "const-senior", "expected_category": "헌법", "age": 50, "question": "위헌법률심판제청의 요건과 절차는 어떻게 되나요?" }
+]
