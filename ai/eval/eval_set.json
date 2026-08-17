@@ -14,8 +14,8 @@
   { "id": "admin-adult",  "expected_category": "행정", "age": 28, "question": "행정기관의 처분에 이의가 있을 때 행정심판과 행정소송 중 무엇을 먼저 해야 하나요?" },
   { "id": "admin-senior", "expected_category": "행정", "age": 50, "question": "영업정지 처분에 대한 집행정지 신청 요건은 무엇인가요?" },
 
-  { "id": "const-child",  "expected_category": "헌법", "age": 8,  "question": "누구나 하고 싶은 말을 자유롭게 할 수 있는 게 맞아요?" },
-  { "id": "const-teen",   "expected_category": "헌법", "age": 15, "question": "학생도 표현의 자유가 있나요?" },
-  { "id": "const-adult",  "expected_category": "헌법", "age": 28, "question": "직업선택의 자유가 법률로 제한될 수 있는 경우는 무엇인가요?" },
-  { "id": "const-senior", "expected_category": "헌법", "age": 50, "question": "위헌법률심판제청의 요건과 절차는 어떻게 되나요?" }
+  { "id": "ip-child",  "expected_category": "지식재산권", "age": 8,  "question": "내가 그린 그림을 친구가 따라 그려서 팔면 안 되는 거 맞죠?" },
+  { "id": "ip-teen",   "expected_category": "지식재산권", "age": 15, "question": "유튜브에 다른 사람 노래를 몰래 넣으면 저작권 위반인가요?" },
+  { "id": "ip-adult",  "expected_category": "지식재산권", "age": 28, "question": "상표권 침해를 판단하는 기준은 무엇인가요?" },
+  { "id": "ip-senior", "expected_category": "지식재산권", "age": 50, "question": "특허권 침해소송에서 손해배상액 산정 기준은 어떻게 되나요?" }
 ]

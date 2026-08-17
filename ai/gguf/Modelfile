@@ -1,6 +1,0 @@
-FROM C:\Users\SMT21\Desktop\legal-rag-chatbot\ai\gguf\legal_exaone_q8.gguf
-
-PARAMETER temperature 0.1
-PARAMETER top_p 0.9
-PARAMETER num_ctx 4096
-PARAMETER repeat_penalty 1.1
