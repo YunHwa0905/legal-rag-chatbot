@@ -42,6 +42,11 @@ def run():
     pipeline = get_pipeline()
     results = []
 
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    out_path = os.path.join(
+        RESULTS_DIR, f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    )
+
     for case in cases:
         print(f"\n[{case['id']}] {case['question']} (age={case['age']})")
 
@@ -81,15 +86,12 @@ def run():
         }
         results.append(record)
 
-        flag = f" ⚠ 미검증 인용 {len(citation_check['unverified'])}건" if citation_check["unverified"] else ""
+        flag = f" [미검증 인용 {len(citation_check['unverified'])}건]" if citation_check["unverified"] else ""
         print(f"  검색결과 {len(sources)}건 / 분야일치율 {record['category_match_rate']:.0%} / {elapsed}s{flag}")
 
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    out_path = os.path.join(
-        RESULTS_DIR, f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    )
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
+        # 중간 저장 — 도중에 죽어도 여기까지는 남음
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
 
     n = len(results)
     unverified_cases = [r for r in results if r["unverified_citations"]]

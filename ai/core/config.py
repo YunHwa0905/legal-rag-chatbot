@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     # ===========================
     # RAG 설정
     # ===========================
-    RAG_TOP_K: int = 5
+    RAG_TOP_K: int = 6
     RAG_MIN_SCORE: float = 0.5
     CHUNK_SIZE: int = 512
     CHUNK_OVERLAP: int = 50
