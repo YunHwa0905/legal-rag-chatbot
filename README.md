@@ -261,9 +261,9 @@ bash deploy/ollama-init.sh
 
 | 항목 | 버전 / 내용 |
 |------|------------|
-| OS | Windows 11 / Ubuntu 22.04 (서버 배포) |
+| OS | Windows 11 / Ubuntu 26.04 (서버 배포, g4dn.xlarge) |
 | Python | 3.11 |
-| JDK | 17 |
+| JDK | 11 (Docker 빌드·`pom.xml` 기준) |
 | Node.js | 18+ |
 | Spring Framework | 5.x (Legacy MVC) |
 | Maven | 3.9+ |
