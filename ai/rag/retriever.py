@@ -6,8 +6,10 @@ RAG 검색 모듈 (개선버전)
 - multi_match 검색으로 품질 향상
 - 컨텍스트 300자 → 500자
 - min_score 조건 완화
+- 문서 제목-질문 매칭 보너스 추가 (제목이 다른데 점수만 높은 문서가 1위로 올라오는 문제 완화)
 """
 
+import re
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,6 +33,53 @@ def get_client() -> OpenSearch:
         verify_certs=False,
         ssl_show_warn=False,
     )
+
+
+# ===========================
+# 제목-질문 매칭 보너스
+#
+# 문제: admin-teen 케이스에서 정답 문서(정보공개법 유권해석, 3위 0.9746점)가
+# 이미 검색됐는데도, 제목이 다른 법(개인정보 보호법, 1위 1.0점)인 오답 문서가
+# 더 높은 점수로 1위에 올라 LLM이 그걸 근거로 답변함. kNN/BM25 점수만으로는
+# "제목이 질문의 법률 분야와 실제로 일치하는지"를 반영하지 못해서 생긴 문제.
+#
+# 문서 본문은 "[법률명 또는 사건명] Q: ... A: ..." 형식으로 시작하므로,
+# 이 대괄호 제목과 질문 단어가 얼마나 겹치는지를 점수에 더해 보정한다.
+# ===========================
+TITLE_MATCH_WEIGHT = 0.6
+
+_PARTICLES = sorted([
+    "으로써", "으로서", "이라서", "에서도", "에게서",
+    "까지", "부터", "한테", "이나", "이며", "이고",
+    "으로", "이라", "이란", "이는", "이가", "이의", "이을", "이를", "이에",
+    "은", "는", "이", "가", "을", "를", "도", "의", "에", "로", "과", "와", "만", "랑", "나", "요",
+], key=len, reverse=True)
+
+
+def _extract_title(text: str) -> str:
+    """문서 본문 맨 앞 대괄호 제목을 추출: '[개인정보 보호법]\\nQ: ...' → '개인정보 보호법'"""
+    match = re.match(r"^\s*\[(.*?)\]", text or "")
+    return match.group(1) if match else ""
+
+
+def _strip_particle(word: str) -> str:
+    """'정보공개청구를' → '정보공개청구' 처럼 흔한 조사만 간단히 제거"""
+    for particle in _PARTICLES:
+        if word.endswith(particle) and len(word) > len(particle) + 1:
+            return word[: -len(particle)]
+    return word
+
+
+def _title_match_score(query: str, title: str) -> float:
+    """질문 단어(2글자 이상, 조사 제거)가 문서 제목에 그대로 포함된 비율(0~1)"""
+    if not title:
+        return 0.0
+    title_flat = re.sub(r"[^가-힣0-9a-zA-Z]", "", title)
+    words = re.findall(r"[가-힣]{2,}", query)
+    if not words:
+        return 0.0
+    hits = sum(1 for w in words if _strip_particle(w) in title_flat and len(_strip_particle(w)) >= 2)
+    return hits / len(words)
 
 
 # ===========================
@@ -144,6 +193,11 @@ class LegalRetriever:
             normalized = hit["_score"] / bm25_max if bm25_max > 0 else 0
             scores[doc_id] = scores.get(doc_id, 0) + normalized * 0.5
             docs[doc_id] = hit["_source"]
+
+        # 제목-질문 매칭 보너스: 제목이 질문과 실제로 겹치는 문서를 우선시
+        for doc_id in scores:
+            title = _extract_title(docs[doc_id].get("text", ""))
+            scores[doc_id] += _title_match_score(query_text, title) * TITLE_MATCH_WEIGHT
 
         # 점수 기준 정렬
         sorted_docs = sorted(scores.items(), key=lambda x: x[1], reverse=True)

@@ -11,6 +11,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rag.retriever import LegalRetriever
+from rag.citation import verify_citations
 from prompt.template import build_prompt
 from core.model import generate
 
@@ -42,10 +43,11 @@ class LegalRAGPipeline:
 
         Returns:
             {
-                "answer": 생성된 답변,
+                "answer": 생성된 답변 (미검증 인용이 있으면 경고 문구 추가됨),
                 "sources": 참조 문서 목록,
                 "age_group_label": 나이대 레이블,
-                "context": 검색된 컨텍스트
+                "context": 검색된 컨텍스트,
+                "citation_check": {"citations": [...], "unverified": [...]}
             }
         """
 
@@ -61,6 +63,7 @@ class LegalRAGPipeline:
                 "sources": [],
                 "age_group_label": "",
                 "context": "",
+                "citation_check": {"citations": [], "unverified": []},
             }
 
         # 검색 결과 → 컨텍스트 텍스트 변환
@@ -85,7 +88,24 @@ class LegalRAGPipeline:
         )
 
         # ===========================
-        # Step 4. 출처 정리
+        # Step 4. 인용 조문 검증
+        #
+        # 컨텍스트에 없는 "OO법 제N조" 인용은 모델이 지어냈을 가능성이 높음
+        # (eval에서 반복 확인된 환각 패턴). 못 찾은 인용이 있으면 답변에
+        # 경고를 덧붙인다 — 문장을 손대지 않고 뒤에 붙이는 방식이라
+        # 답변 자체의 문맥은 그대로 유지된다.
+        # ===========================
+        citation_check = verify_citations(answer, context)
+        if citation_check["unverified"]:
+            print(f"[WARN] 미검증 인용 발견: {citation_check['unverified']}")
+            answer += (
+                "\n\n[알림] 위 답변에 포함된 다음 인용은 제공된 문서에서 확인되지 않았습니다: "
+                + ", ".join(citation_check["unverified"])
+                + ". 실제 적용 전 원문을 반드시 확인하세요."
+            )
+
+        # ===========================
+        # Step 5. 출처 정리
         # ===========================
         sources = [
             {
@@ -104,6 +124,7 @@ class LegalRAGPipeline:
             "sources": sources,
             "age_group_label": prompt["age_group_label"],
             "context": context,
+            "citation_check": citation_check,
         }
 
 
