@@ -1,0 +1,66 @@
+# ===========================================================
+# LexAI 리버스 프록시
+#
+# SITE_ADDRESS 값 하나로 HTTP / HTTPS 가 전환됩니다.
+#   .env 에서 SITE_ADDRESS=:80               → HTTP  (도메인 없을 때)
+#   .env 에서 SITE_ADDRESS=lexai.duckdns.org → HTTPS (인증서 자동 발급)
+#
+# 도메인을 넣기 전 조건: A 레코드가 3.36.138.239 를 가리키고 DNS 전파 완료.
+# 순서를 바꾸면 ACME 도메인 검증이 실패합니다.
+# ===========================================================
+
+{$SITE_ADDRESS} {
+
+	encode zstd gzip
+
+	# -------------------------------------------------------
+	# API → Spring Legacy (ROOT.war 로 배포되어 컨텍스트 경로 없음)
+	#
+	# 프론트와 API 가 같은 오리진이 되므로 CORS 자체가 필요 없어지고,
+	# HTTPS 페이지에서 http:// 를 호출하는 mixed content 도 발생하지 않습니다.
+	# -------------------------------------------------------
+	handle /api/* {
+		reverse_proxy tomcat:8080 {
+			transport http {
+				# LLM 추론 응답이 길어질 수 있으므로 넉넉하게.
+				# (nginx 는 기본 60초라 504 가 나지만 Caddy 는 기본 무제한입니다.
+				#  의도를 명시해 두는 값입니다.)
+				read_timeout 300s
+				write_timeout 300s
+			}
+		}
+	}
+
+	# -------------------------------------------------------
+	# 그 외 전부 → 정적 프론트엔드
+	# -------------------------------------------------------
+	handle {
+		reverse_proxy frontend:3000
+	}
+
+	# -------------------------------------------------------
+	# 보안 헤더
+	# -------------------------------------------------------
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
+
+# ===========================================================
+# 도메인을 붙인 뒤(HTTPS 전환 후) 아래를 참고하세요.
+#
+# 1) 인증서 발급 알림 메일을 받고 싶으면 이 파일 맨 위에 추가:
+#      { email you@example.com }
+#
+# 2) HSTS 는 HTTPS 가 확실히 동작하는 것을 확인한 다음에 켜세요.
+#    먼저 켜면 문제가 생겼을 때 브라우저가 HTTP 로 되돌아가지 못합니다.
+#      header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+# ===========================================================

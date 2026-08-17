@@ -1,0 +1,246 @@
+# ===========================================================
+# LexAI 배포 구성
+#
+#   [브라우저] → caddy(80/443) ─┬→ frontend (Express, 정적 3페이지)
+#                               └→ /api/* → tomcat (Spring Legacy WAR)
+#                                              └→ ai (FastAPI)
+#                                                   ├→ opensearch (BM25 + kNN)
+#                                                   └→ ollama (Gemma 3 4B, GPU)
+#                                  tomcat → mysql (사용자 정보)
+#
+# 외부에 열리는 포트는 caddy 의 80/443 뿐입니다.
+# 9200(OpenSearch) / 11434(Ollama) / 3306(MySQL) 은 내부 네트워크에만 존재합니다.
+# ===========================================================
+
+services:
+
+  # ---------------------------------------------------------
+  # 리버스 프록시 — 단일 오리진 + HTTPS 자동 발급
+  # ---------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    container_name: lexai-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"      # HTTP/3
+    environment:
+      # .env 의 SITE_ADDRESS 를 Caddyfile 이 그대로 사용합니다.
+      #   :80              → HTTP (도메인 없을 때)
+      #   lexai.duckdns.org → HTTPS 자동 발급
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data          # 발급받은 인증서 — 반드시 볼륨 (지우면 재발급 rate limit 걸림)
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - tomcat
+
+  # ---------------------------------------------------------
+  # 프론트엔드 — Express 정적 서버
+  # ---------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+    container_name: lexai-frontend
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+    expose:
+      - "3000"
+
+  # ---------------------------------------------------------
+  # 백엔드 — Spring Legacy WAR (Tomcat 9 / Java 11)
+  #   ROOT.war 로 배포하므로 컨텍스트 경로 /backend_spring 이 없습니다.
+  #   → API 경로는 /api/auth/*, /api/chat
+  # ---------------------------------------------------------
+  tomcat:
+    build:
+      context: ./backend_spring
+    container_name: lexai-tomcat
+    restart: unless-stopped
+    environment:
+      DB_URL: ${DB_URL}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRATION: ${JWT_EXPIRATION:-86400000}
+      FASTAPI_URL: ${FASTAPI_URL:-http://ai:8000}
+      CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-}
+    expose:
+      - "8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      ai:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  # ---------------------------------------------------------
+  # AI 서버 — FastAPI + RAG
+  # ---------------------------------------------------------
+  ai:
+    build:
+      context: ./ai
+    container_name: lexai-ai
+    restart: unless-stopped
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8000
+      APP_ENV: production
+
+      OPENSEARCH_HOST: ${OPENSEARCH_HOST:-opensearch}
+      OPENSEARCH_PORT: ${OPENSEARCH_PORT:-9200}
+      OPENSEARCH_USER: ${OPENSEARCH_USER:-admin}
+      OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD}
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-legal_documents}
+      OPENSEARCH_USE_SSL: ${OPENSEARCH_USE_SSL:-true}
+
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-legal-gemma}
+
+      RAG_TOP_K: ${RAG_TOP_K:-6}
+      RAG_MIN_SCORE: ${RAG_MIN_SCORE:-0.5}
+      MAX_NEW_TOKENS: ${MAX_NEW_TOKENS:-768}
+      TEMPERATURE: ${TEMPERATURE:-0.1}
+      TOP_P: ${TOP_P:-0.9}
+
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+      # 프록시 뒤 단일 오리진이라 CORS 불필요. 값이 있으면 그 오리진만 허용.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGIN:-}
+      # 임베딩 모델(약 450MB) 캐시 위치 — 볼륨에 두어 재기동 시 재다운로드 방지
+      HF_HOME: /root/.cache/huggingface
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    expose:
+      - "8000"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    healthcheck:
+      # 앱 시작 시 lifespan 에서 임베딩 모델을 미리 로드하므로
+      # 최초 기동은 수십 초~수 분 걸립니다. start_period 를 넉넉히 둡니다.
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')\" || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 300s
+
+  # ---------------------------------------------------------
+  # LLM — Ollama (NVIDIA T4 사용)
+  #   최초 1회 모델 생성이 필요합니다: bash deploy/ollama-init.sh
+  # ---------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: lexai-ollama
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      # 유휴 시 모델을 VRAM 에서 내리지 않음 → 첫 질문 지연 제거
+      OLLAMA_KEEP_ALIVE: 24h
+    volumes:
+      - ollama_models:/root/.ollama   # 모델 5GB — 반드시 볼륨(EBS)
+    expose:
+      - "11434"
+    # GPU 할당. 이 블록이 없으면 에러 없이 CPU 로 폴백해 응답이 1~3분으로 느려집니다.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------
+  # 벡터 DB — OpenSearch 2.13 (단일 노드)
+  # ---------------------------------------------------------
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: lexai-opensearch
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_JAVA_OPTS=-Xms${OPENSEARCH_HEAP:-2g} -Xmx${OPENSEARCH_HEAP:-2g}
+      # 2.12 부터 필수. 없으면 부팅 실패합니다.
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_PASSWORD}
+      # 스냅샷 복원용 경로 등록 (학교에서 가져온 인덱스를 restore 할 때 사용)
+      - path.repo=/mnt/snapshots
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data   # 인덱스 253,207건 — 반드시 볼륨
+      - ./deploy/snapshots:/mnt/snapshots            # 스냅샷 tar 를 여기에 풀어둡니다
+    expose:
+      - "9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sk -u admin:$${OPENSEARCH_INITIAL_ADMIN_PASSWORD} https://127.0.0.1:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 90s
+
+  # ---------------------------------------------------------
+  # RDB — MySQL 8 (사용자 정보)
+  # ---------------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: lexai-mysql
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-legal_chatbot}
+      MYSQL_USER: ${DB_USERNAME}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      TZ: Asia/Seoul
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # 최초 기동 시 1회만 실행됩니다 (mysql_data 가 비어 있을 때).
+      - ./deploy/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    expose:
+      - "3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$${MYSQL_ROOT_PASSWORD} --silent || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
+
+
+# ===========================================================
+# 볼륨 — 재기동/재빌드해도 살아남아야 하는 데이터
+#
+# ★ 주의: g4dn 인스턴스의 125GB NVMe 는 임시 스토리지라
+#         stop/start 시 삭제됩니다. 이 볼륨들은 도커 기본 위치
+#         (/var/lib/docker/volumes → 루트 EBS) 에 있어야 안전합니다.
+# ===========================================================
+volumes:
+  mysql_data:
+  opensearch_data:
+  ollama_models:
+  hf_cache:
+  caddy_data:
+  caddy_config:

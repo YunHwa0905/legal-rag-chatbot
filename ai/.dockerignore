@@ -1,0 +1,34 @@
+# 학습 스크립트 (서버에서 불필요)
+01.data_preprocessing.py
+02.Fine_tune.py
+03.Load_And_Save.py
+04.gguf_convert.py
+upload_only.py
+fix_config.py
+
+# 모델 / 변환 도구 (수 GB)
+gguf/
+models/
+*.gguf
+*.safetensors
+
+# 데이터 (인덱스는 OpenSearch 볼륨에 있음)
+data/raw/
+data/processed/
+data/chunks/
+
+# 평가 / 결과
+eval/
+results/
+
+# 학습용 requirements (torch+transformers+peft 등)
+requirements.txt
+
+# 캐시
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.venv_gguf/
+.env
+*.log

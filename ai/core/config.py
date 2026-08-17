@@ -36,15 +36,31 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "jhgan/ko-sroberta-multitask"
     EMBEDDING_DIMENSION: int = 768
 
+    # cpu / cuda. 질문 1건 임베딩이라 CPU 로도 수십 ms 수준입니다.
+    # cuda 로 두더라도 CUDA 를 못 쓰는 환경이면 자동으로 CPU 로 내려갑니다.
+    EMBEDDING_DEVICE: str = "cpu"
+
     # ===========================
     # OpenSearch 설정
+    #
+    # 비밀번호는 기본값을 두지 않습니다(코드에 박아두면 git 에 남습니다).
+    # 환경변수 OPENSEARCH_PASSWORD 로 주입하세요 — .env.example 참고.
     # ===========================
     OPENSEARCH_HOST: str = "localhost"
     OPENSEARCH_PORT: int = 9200
     OPENSEARCH_USER: str = "admin"
-    OPENSEARCH_PASSWORD: str = "Legal@Rag2024!"
+    OPENSEARCH_PASSWORD: str = ""
     OPENSEARCH_INDEX: str = "legal_documents"
     OPENSEARCH_USE_SSL: bool = True
+
+    # ===========================
+    # CORS 설정
+    #
+    # 쉼표로 구분된 허용 오리진 목록.
+    # 배포 환경에서는 리버스 프록시가 단일 오리진으로 묶고 이 서버는
+    # 브라우저가 직접 호출하지 않으므로 빈 값("")으로 끕니다.
+    # ===========================
+    CORS_ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:8080"
 
     # ===========================
     # RAG 설정
@@ -65,6 +81,9 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        # 배포 시 .env 에는 MySQL·JWT 등 다른 서비스용 값도 함께 들어있으므로
+        # 여기서 정의하지 않은 키가 있어도 무시합니다.
+        extra = "ignore"
 
 
 @lru_cache()

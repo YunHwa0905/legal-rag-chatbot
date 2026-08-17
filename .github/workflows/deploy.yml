@@ -1,0 +1,60 @@
+# ===========================================================
+# 자동 배포
+#
+# ★ 순서 주의: 이 워크플로는 "수동 배포가 한 번 성공한 다음에" 켜세요.
+#   수동으로 성공하지 못한 배포를 자동화하면 실패 원인이 두 배로 늘어납니다.
+#
+# 그래서 지금은 workflow_dispatch(수동 실행)만 켜져 있습니다.
+# 수동 배포와 기능 검증이 끝나면 아래 push 트리거의 주석을 해제하세요.
+#
+# 필요한 GitHub Secrets (Settings → Secrets and variables → Actions):
+#   EC2_HOST     : 3.36.138.239  (탄력적 IP)
+#   EC2_USER     : ubuntu        (Deep Learning AMI 기본 사용자)
+#   EC2_SSH_KEY  : .pem 키 파일 전체 내용 (-----BEGIN ... KEY----- 포함)
+#   APP_DIR      : (선택) 서버의 저장소 경로. 기본값 /home/ubuntu/legal-rag-chatbot
+# ===========================================================
+
+name: Deploy to EC2
+
+on:
+  workflow_dispatch:
+
+  # 수동 배포 성공 후 아래 3줄의 주석을 해제하세요.
+  # push:
+  #   branches:
+  #     - main
+
+# 배포가 겹쳐 실행되지 않게 합니다 (동시에 두 번 빌드하면 디스크가 터집니다).
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: SSH 키 준비
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # 호스트 키를 미리 등록해 StrictHostKeyChecking 을 끄지 않습니다.
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: 서버에서 배포 실행
+        env:
+          APP_DIR: ${{ secrets.APP_DIR }}
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -o ConnectTimeout=15 \
+              "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+              "APP_DIR='${APP_DIR:-/home/ubuntu/legal-rag-chatbot}' bash -s" \
+              < deploy/remote-deploy.sh
+
+      - name: SSH 키 삭제
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

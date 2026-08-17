@@ -37,9 +37,13 @@
     <bean id="passwordEncoder"
           class="org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder"/>
 
+    <!--
+        FastAPI 주소는 환경마다 다르므로 db.properties(=환경변수) 에서 읽습니다.
+        컨테이너 배포 시에는 서비스 이름으로 접근합니다: http://ai:8000
+    -->
     <bean id="webClient" class="org.springframework.web.reactive.function.client.WebClient"
           factory-method="create">
-        <constructor-arg value="http://localhost:8000"/>
+        <constructor-arg value="${fastapi.url}"/>
     </bean>
 
 </beans>

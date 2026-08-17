@@ -44,18 +44,29 @@ app = FastAPI(
 
 
 # ===========================
-# CORS 설정 (Next.js 연동용)
+# CORS 설정
+#
+# 허용 오리진은 환경변수 CORS_ALLOWED_ORIGINS (쉼표 구분) 로 지정합니다.
+# 배포 환경에서는 이 서버를 브라우저가 직접 호출하지 않고 Spring 이
+# 서버 사이드로 호출하므로 빈 값으로 두어 미들웨어를 끕니다.
 # ===========================
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",    # Next.js
-        "http://localhost:8080",    # Spring Boot
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+allowed_origins = [
+    origin.strip()
+    for origin in settings.CORS_ALLOWED_ORIGINS.split(",")
+    if origin.strip()
+]
+
+if allowed_origins:
+    print(f"[INFO] CORS 허용 오리진: {allowed_origins}")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    print("[INFO] CORS 비활성화 (동일 오리진 프록시 구성)")
 
 
 # ===========================

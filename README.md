@@ -214,10 +214,13 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 ### 3. 백엔드 (Spring Legacy)
 
 ```bash
-cd backend
+cd backend_spring
 # STS에서 서버 실행 또는 WAR 배포
 # 포트: 8181
 ```
+
+> 로컬 실행 시 `src/main/resources/db.properties` 의 DB 접속 정보와 시크릿을
+> 본인 환경에 맞게 수정하세요. 이 파일에는 개발용 기본값만 들어 있습니다.
 
 ### 4. 프론트엔드 (Node.js)
 
@@ -227,6 +230,30 @@ npm install
 node server.js
 # 포트: 3000
 ```
+
+---
+
+## 🚀 배포 (Docker + AWS EC2)
+
+전체 서비스를 컨테이너로 묶어 배포합니다. 절차·검증 방법·트러블슈팅은
+**[DEPLOY.md](DEPLOY.md)** 에 정리되어 있습니다.
+
+```bash
+cp .env.example .env      # 비밀값 작성
+docker compose build
+docker compose up -d
+bash deploy/ollama-init.sh
+```
+
+| 구성 | 내용 |
+|------|------|
+| 리버스 프록시 | Caddy (HTTPS 자동 발급, 단일 오리진) |
+| 서비스 | frontend / tomcat / ai / ollama / opensearch / mysql |
+| 외부 포트 | 80, 443 만 |
+| 설정 | 전부 환경변수 (`.env.example` 참고) |
+
+배포 구성에서는 WAR 를 `ROOT` 로 올려 컨텍스트 경로 `/backend_spring` 이 없어지고,
+프론트엔드가 상대경로(`/api/...`)만 사용하므로 CORS 가 불필요해집니다.
 
 ---
 
@@ -257,7 +284,8 @@ node server.js
 - [x] Spring Legacy JWT 인증 (회원가입 / 로그인)
 - [x] FastAPI 연동 채팅 API
 - [x] 프론트엔드 3페이지 UI (로그인 / 회원가입 / 채팅)
-- [x] 서버 배포 (`168.107.44.47`) 및 포트 오픈
+- [x] 서버 배포 및 포트 오픈
+- [ ] Docker Compose 컨테이너화 + AWS EC2 배포 → [DEPLOY.md](DEPLOY.md)
 
 ---
 
@@ -267,8 +295,9 @@ node server.js
 |------|------|------|
 | 응답 속도 약 83초 | 해결 | Gemma 3 4B GGUF + Ollama 전환 후 평균 15.5초로 개선 (`ai/eval/run_eval.py` 16문항 측정 기준) |
 | 분야 필터/분야일치율 지표 신뢰도 낮음 | 확인됨 | `law_category`가 주제(민사/형사/행정/지식재산권)가 아니라 사건 진행 절차(형사재판/행정소송 등) 기준으로 태깅되어 있음 (예: 상표법 위반은 형사재판이라 `형사법`, 특허 권리범위확인 항고는 `행정법`). 검색 자체는 내용상 정확한 경우가 많으나, 분야 필터·분야일치 지표는 이 구조에서 신뢰하기 어려움 |
-| Spring Legacy Context Path | 확인 필요 | `/backend_spring` 경로 수동 수정 |
-| 통합 테스트 | 미완료 | FastAPI / Spring / Node.js 전체 연동 테스트 보류 중 |
+| Spring Legacy Context Path | 배포 구성에서 해결 | 배포 시 WAR 를 `ROOT` 로 올려 `/backend_spring` 경로가 없어짐. 로컬 STS 실행 시에는 여전히 컨텍스트 경로가 붙음 |
+| 통합 테스트 | 미완료 | API 단위 검증 절차는 [DEPLOY.md](DEPLOY.md) 5·8단계에 정리됨 (실행은 배포 후) |
+| 세션 저장소 | 해당 없음 | JWT 무상태 인증이라 재기동해도 로그인이 유지됨. 사용자 증가 시에도 외부 세션 저장소가 불필요 |
 
 ---
 

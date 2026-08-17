@@ -83,6 +83,30 @@ def _title_match_score(query: str, title: str) -> float:
 
 
 # ===========================
+# 임베딩 디바이스 결정
+#
+# 배포 이미지는 디스크 절약을 위해 CPU 전용 torch 를 설치합니다(LLM 추론은
+# Ollama 컨테이너가 GPU 로 담당). EMBEDDING_DEVICE=cuda 로 설정됐는데 CUDA 를
+# 쓸 수 없는 환경이면 여기서 예외가 나 서버가 아예 뜨지 않으므로,
+# 조용히 CPU 로 내려가고 경고만 남깁니다.
+# ===========================
+def _resolve_device(requested: str) -> str:
+    device = (requested or "cpu").strip().lower()
+
+    if device.startswith("cuda"):
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                print("[WARN] CUDA 를 사용할 수 없어 임베딩을 CPU 로 실행합니다.")
+                return "cpu"
+        except ImportError:
+            print("[WARN] torch 를 불러올 수 없어 임베딩을 CPU 로 실행합니다.")
+            return "cpu"
+
+    return device
+
+
+# ===========================
 # Retriever 클래스
 # ===========================
 class LegalRetriever:
@@ -90,7 +114,10 @@ class LegalRetriever:
     def __init__(self):
         print("[INFO] 검색 모듈 초기화 중...")
         self.client = get_client()
-        self.model = SentenceTransformer(settings.EMBEDDING_MODEL)
+        self.model = SentenceTransformer(
+            settings.EMBEDDING_MODEL,
+            device=_resolve_device(settings.EMBEDDING_DEVICE),
+        )
         self.index = settings.OPENSEARCH_INDEX
         self.top_k = settings.RAG_TOP_K
         self.min_score = settings.RAG_MIN_SCORE
