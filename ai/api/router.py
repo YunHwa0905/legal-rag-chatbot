@@ -11,7 +11,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import APIRouter, HTTPException
-from api.schemas import ChatRequest, ChatResponse, HealthResponse, SourceDocument
+from api.schemas import ChatRequest, ChatResponse, HealthResponse, SourceDocument, DocumentDetail
 from rag.pipeline import get_pipeline
 
 router = APIRouter()
@@ -64,3 +64,23 @@ async def chat(request: ChatRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===========================
+# 참고 문서 원문 조회
+# ===========================
+@router.get("/documents/{doc_id}", response_model=DocumentDetail)
+async def get_document(doc_id: int):
+    pipeline = get_pipeline()
+    doc = pipeline.retriever.get_by_id(doc_id)
+
+    if doc is None:
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
+
+    return DocumentDetail(
+        doc_id=doc_id,
+        law_category=doc.get("law_category", ""),
+        doc_type=doc.get("doc_type", ""),
+        source=doc.get("source", ""),
+        text=doc.get("text", ""),
+    )

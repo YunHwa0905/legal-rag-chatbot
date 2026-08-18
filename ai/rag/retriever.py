@@ -15,6 +15,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from opensearchpy import OpenSearch
+from opensearchpy.exceptions import NotFoundError
 from sentence_transformers import SentenceTransformer
 from core.config import settings
 
@@ -250,6 +251,19 @@ class LegalRetriever:
         query_vector = self._embed_query(query)
         results = self._hybrid_search(query, query_vector, law_category)
         return results
+
+    # ===========================
+    # 문서 원문 단건 조회 (참고 문서 클릭 시 사용)
+    #
+    # 색인 시 _id 를 doc_id 로 지정했으므로(loader.py make_action) 검색 없이
+    # 바로 get 으로 가져올 수 있음 — 임베딩 계산도 필요 없어 매우 가볍다.
+    # ===========================
+    def get_by_id(self, doc_id: int) -> dict:
+        try:
+            hit = self.client.get(index=self.index, id=str(doc_id))
+        except NotFoundError:
+            return None
+        return hit["_source"]
 
     # ===========================
     # 오염 텍스트 정제

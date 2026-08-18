@@ -309,6 +309,84 @@
             margin: 2px 3px 2px 0;
         }
 
+        .source-chip.clickable {
+            cursor: pointer;
+            font-family: inherit;
+            transition: all 0.15s;
+        }
+
+        .source-chip.clickable:hover {
+            background: #eff6ff;
+            border-color: #bfdbfe;
+            color: #1d4ed8;
+        }
+
+        /* 참고 문서 원문 모달 (성인/중장년 나이대 전용) */
+        .doc-modal-backdrop {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(17, 24, 39, 0.45);
+            z-index: 100;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+
+        .doc-modal-backdrop.open { display: flex; }
+
+        .doc-modal {
+            background: #fff;
+            border-radius: 14px;
+            max-width: 560px;
+            width: 100%;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.2);
+        }
+
+        .doc-modal-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 18px 20px;
+            border-bottom: 1px solid #f3f4f6;
+        }
+
+        .doc-modal-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+
+        .doc-modal-source {
+            font-size: 12px;
+            color: #9ca3af;
+        }
+
+        .doc-modal-close {
+            background: transparent;
+            border: none;
+            font-size: 18px;
+            color: #9ca3af;
+            cursor: pointer;
+            line-height: 1;
+            padding: 4px;
+            flex-shrink: 0;
+        }
+
+        .doc-modal-close:hover { color: #374151; }
+
+        .doc-modal-body {
+            padding: 18px 20px;
+            overflow-y: auto;
+            font-size: 13.5px;
+            line-height: 1.75;
+            color: #374151;
+            white-space: pre-wrap;
+            word-break: keep-all;
+        }
+
+        .doc-modal-body.loading { color: #9ca3af; }
+
         /* 로딩 */
         .loading-dots {
             display: flex;
@@ -469,6 +547,20 @@
         </div>
     </div>
 
+    <!-- 참고 문서 원문 모달 -->
+    <div class="doc-modal-backdrop" id="docModalBackdrop">
+        <div class="doc-modal">
+            <div class="doc-modal-head">
+                <div>
+                    <div class="doc-modal-tags" id="docModalTags"></div>
+                    <div class="doc-modal-source" id="docModalSource"></div>
+                </div>
+                <button class="doc-modal-close" id="docModalClose">✕</button>
+            </div>
+            <div class="doc-modal-body" id="docModalBody"></div>
+        </div>
+    </div>
+
     <script>
         const token = localStorage.getItem('token');
         const username = localStorage.getItem('username');
@@ -502,14 +594,27 @@
             scrollBottom();
         }
 
-        function addBotMsg(text, sources) {
+        // 원문 보기는 성인/중장년(만 20세 이상)에게만 제공 —
+        // 법률 원문이 초등학생·청소년에게는 오히려 혼란을 줄 수 있어 나이대로 제한.
+        function canViewSourceText(age) {
+            return typeof age === 'number' && age >= 20;
+        }
+
+        function addBotMsg(text, sources, age) {
             let sourcesHtml = '';
             if (sources && sources.length > 0) {
-                sourcesHtml = '<div class="sources"><div class="sources-title">📎 참고 문서</div>';
+                const clickable = canViewSourceText(age);
+                sourcesHtml = '<div class="sources"><div class="sources-title">📎 참고 문서'
+                    + (clickable ? ' <span style="font-weight:400;">(클릭하면 원문을 볼 수 있어요)</span>' : '')
+                    + '</div>';
                 sources.forEach(s => {
-                    const cat = s.lawCategory || '';
-                    const type = s.docType || '';
-                    sourcesHtml += `<span class="source-chip">📄 ${cat} ${type}</span>`;
+                    const cat = s.law_category || '';
+                    const type = s.doc_type || '';
+                    if (clickable) {
+                        sourcesHtml += `<button type="button" class="source-chip clickable" data-doc-id="${s.doc_id}">📄 ${cat} ${type}</button>`;
+                    } else {
+                        sourcesHtml += `<span class="source-chip">📄 ${cat} ${type}</span>`;
+                    }
                 });
                 sourcesHtml += '</div>';
             }
@@ -567,7 +672,7 @@
                 data: JSON.stringify({ question, lawCategory: null }),
                 success: function (res) {
                     $('#loadingRow').remove();
-                    addBotMsg(res.answer, res.sources);
+                    addBotMsg(res.answer, res.sources, res.age);
                     $('#sendBtn').prop('disabled', false);
                 },
                 error: function (err) {
@@ -578,6 +683,49 @@
                 }
             });
         }
+
+        // 참고 문서 칩 클릭 → 원문 모달
+        function openDocModal(docId) {
+            $('#docModalBackdrop').addClass('open');
+            $('#docModalTags').empty();
+            $('#docModalSource').text('');
+            $('#docModalBody').addClass('loading').text('불러오는 중...');
+
+            $.ajax({
+                url: '/api/documents/' + docId,
+                type: 'GET',
+                headers: { 'Authorization': 'Bearer ' + token },
+                success: function (doc) {
+                    $('#docModalTags').html(
+                        `<span class="source-chip">${doc.law_category || ''}</span>` +
+                        `<span class="source-chip">${doc.doc_type || ''}</span>`
+                    );
+                    $('#docModalSource').text('출처: ' + (doc.source || ''));
+                    $('#docModalBody').removeClass('loading').text(doc.text || '');
+                },
+                error: function (err) {
+                    const msg = err.status === 404 ? '문서를 찾을 수 없습니다.' : '원문을 불러오지 못했습니다.';
+                    $('#docModalBody').removeClass('loading').text(msg);
+                    if (err.status === 401) { localStorage.clear(); window.location.href = '/'; }
+                }
+            });
+        }
+
+        function closeDocModal() {
+            $('#docModalBackdrop').removeClass('open');
+        }
+
+        $('#msgGroup').on('click', '.source-chip.clickable', function () {
+            openDocModal($(this).data('doc-id'));
+        });
+
+        $('#docModalClose').click(closeDocModal);
+        $('#docModalBackdrop').click(function (e) {
+            if (e.target === this) closeDocModal();
+        });
+        $(document).keydown(function (e) {
+            if (e.key === 'Escape') closeDocModal();
+        });
 
         $('#sendBtn').click(sendMessage);
 

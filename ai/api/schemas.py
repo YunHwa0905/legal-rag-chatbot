@@ -50,6 +50,17 @@ class ChatResponse(BaseModel):
 
 
 # ===========================
+# 문서 원문 조회 (참고 문서 클릭)
+# ===========================
+class DocumentDetail(BaseModel):
+    doc_id: int
+    law_category: str
+    doc_type: str
+    source: str
+    text: str
+
+
+# ===========================
 # Health Check
 # ===========================
 class HealthResponse(BaseModel):

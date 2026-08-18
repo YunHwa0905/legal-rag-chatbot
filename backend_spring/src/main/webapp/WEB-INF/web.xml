@@ -33,7 +33,7 @@
         필터 실행 순서: web.xml 에 선언된 순서대로 실행됩니다.
         1. encodingFilter  — 요청/응답 UTF-8 보장
         2. corsFilter      — CORS 헤더 설정 + OPTIONS preflight 처리
-        3. jwtFilter       — /api/chat/* 에만 적용, JWT 검증
+        3. jwtFilter       — /api/chat/*, /api/documents/* 에 적용, JWT 검증
     -->
 
     <!-- 1. UTF-8 인코딩 -->
@@ -58,7 +58,7 @@
         <url-pattern>/*</url-pattern>
     </filter-mapping>
 
-    <!-- 3. JWT — /api/chat/* 에만 적용 -->
+    <!-- 3. JWT — /api/chat/*, /api/documents/* 에 적용 -->
     <filter>
         <filter-name>jwtFilter</filter-name>
         <filter-class>com.legal.backend.filter.JwtFilter</filter-class>
@@ -66,6 +66,10 @@
     <filter-mapping>
         <filter-name>jwtFilter</filter-name>
         <url-pattern>/api/chat/*</url-pattern>
+    </filter-mapping>
+    <filter-mapping>
+        <filter-name>jwtFilter</filter-name>
+        <url-pattern>/api/documents/*</url-pattern>
     </filter-mapping>
 
 </web-app>
