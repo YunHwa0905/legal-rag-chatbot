@@ -2,11 +2,13 @@
 RAG 검색 모듈 (개선버전)
 
 변경사항:
-- BM25 가중치 0.3 → 0.5
+- BM25 가중치 0.3 → 0.5 → 1.0 (kNN과 동률. kNN이 완전히 엉뚱한 문서를 상위에
+  올려도 BM25가 정답을 정확히 찾아낸 경우 구조적으로 못 이기던 문제 수정)
 - multi_match 검색으로 품질 향상
 - 컨텍스트 300자 → 500자
 - min_score 조건 완화
 - 문서 제목-질문 매칭 보너스 추가 (제목이 다른데 점수만 높은 문서가 1위로 올라오는 문제 완화)
+- kNN/BM25 후보 풀을 top_k보다 넓게(최소 30) 가져온 뒤 합산해서 최종 top_k만 반환
 """
 
 import re
@@ -137,14 +139,15 @@ class LegalRetriever:
     # ===========================
     # kNN 벡터 검색
     # ===========================
-    def _knn_search(self, query_vector: list, law_category: str = None) -> list:
+    def _knn_search(self, query_vector: list, law_category: str = None, size: int = None) -> list:
+        size = size or self.top_k
         query = {
-            "size": self.top_k,
+            "size": size,
             "query": {
                 "knn": {
                     "embedding": {
                         "vector": query_vector,
-                        "k": self.top_k,
+                        "k": size,
                     }
                 }
             },
@@ -155,7 +158,7 @@ class LegalRetriever:
             query["query"] = {
                 "bool": {
                     "must": [
-                        {"knn": {"embedding": {"vector": query_vector, "k": self.top_k}}}
+                        {"knn": {"embedding": {"vector": query_vector, "k": size}}}
                     ],
                     "filter": [
                         {"term": {"law_category": law_category}}
@@ -169,7 +172,8 @@ class LegalRetriever:
     # ===========================
     # BM25 키워드 검색 (multi_match로 개선)
     # ===========================
-    def _bm25_search(self, query_text: str, law_category: str = None) -> list:
+    def _bm25_search(self, query_text: str, law_category: str = None, size: int = None) -> list:
+        size = size or self.top_k
         # multi_match: text + source 필드 동시 검색
         must_query = {
             "multi_match": {
@@ -182,7 +186,7 @@ class LegalRetriever:
         }
 
         query = {
-            "size": self.top_k,
+            "size": size,
             "query": must_query if not law_category else {
                 "bool": {
                     "must": [must_query],
@@ -197,11 +201,18 @@ class LegalRetriever:
 
     # ===========================
     # 하이브리드 검색 (kNN + BM25)
-    # BM25 가중치 0.3 → 0.5로 상향
+    # BM25 가중치 0.3 → 0.5 → 1.0 (kNN과 동률)
+    #
+    # 후보 풀은 top_k보다 훨씬 넓게(CANDIDATE_POOL_SIZE) 가져온 뒤 합산·정렬해서
+    # 마지막에만 top_k로 자른다. 예: "가압류가 무엇인가요?" 쿼리에서 kNN은 30위
+    # 안에도 민사법 문서가 전혀 없고, BM25는 민사법 문서를 1위로 정확히 찾아내는데
+    # 각 채널을 top_k(6)로만 가져오면 BM25 쪽 정답이 애초에 후보에 못 들어와
+    # 하이브리드 합산에서 살아남을 기회조차 없었다 — 이 문제를 이렇게 고친다.
     # ===========================
     def _hybrid_search(self, query_text: str, query_vector: list, law_category: str = None) -> list:
-        knn_results = self._knn_search(query_vector, law_category)
-        bm25_results = self._bm25_search(query_text, law_category)
+        pool_size = max(self.top_k * 5, 30)
+        knn_results = self._knn_search(query_vector, law_category, size=pool_size)
+        bm25_results = self._bm25_search(query_text, law_category, size=pool_size)
 
         scores = {}
         docs = {}
@@ -214,12 +225,18 @@ class LegalRetriever:
             scores[doc_id] = scores.get(doc_id, 0) + normalized
             docs[doc_id] = hit["_source"]
 
-        # BM25 점수 정규화 후 합산 (가중치 0.5)
+        # BM25 점수 정규화 후 합산 (가중치 0.5 → 1.0)
+        #
+        # 가중치가 0.5였을 때는 kNN 1등(정규화 1.0)이 BM25 1등(정규화 1.0×0.5=0.5)을
+        # 구조적으로 항상 이겼다. "가압류" 같은 쿼리에서 kNN 임베딩이 완전히 엉뚱한
+        # 문서(일반 "압류" 행정/세무 문서)를 상위에 올리고 BM25는 정답(민사법 "가압류"
+        # 문서)을 정확히 찾아내도, kNN 가중치가 두 배라 BM25의 정답이 최종 후보에서
+        # 밀려났다. 1.0으로 동률을 만들어 두 채널이 대등하게 경쟁하도록 한다.
         bm25_max = max((h["_score"] for h in bm25_results), default=1)
         for hit in bm25_results:
             doc_id = hit["_source"]["doc_id"]
             normalized = hit["_score"] / bm25_max if bm25_max > 0 else 0
-            scores[doc_id] = scores.get(doc_id, 0) + normalized * 0.5
+            scores[doc_id] = scores.get(doc_id, 0) + normalized
             docs[doc_id] = hit["_source"]
 
         # 제목-질문 매칭 보너스: 제목이 질문과 실제로 겹치는 문서를 우선시
