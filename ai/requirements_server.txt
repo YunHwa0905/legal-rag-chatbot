@@ -20,3 +20,6 @@ pandas==2.2.2
 numpy==1.26.4
 tqdm==4.66.5
 requests==2.32.3
+
+# 대용량 JSON 스트리밍 파싱 (indexing/loader.py — 전체를 메모리에 올리지 않기 위함)
+ijson==3.3.0

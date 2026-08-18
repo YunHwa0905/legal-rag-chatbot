@@ -2,22 +2,30 @@
 OpenSearch 데이터 적재 스크립트
 
 역할:
-- rag_documents.json 읽기
+- rag_documents.json 읽기 (ijson 스트리밍 — 253,207건을 한 번에 메모리에 올리지 않음)
 - 임베딩 모델로 텍스트 벡터 변환
 - OpenSearch에 bulk 적재
+
+메모리 노트:
+    처음엔 json.load() 로 파일 전체(1.9GB)를 리스트로 올렸는데, RAM 16GB 서버에서
+    OpenSearch·Ollama 등 다른 컨테이너와 같이 뜬 상태로는 5~8GB까지 치솟다가
+    OOM killer 에 죽었습니다(스왑 4GB를 붙여도 마찬가지). ijson 으로 문서 단위
+    스트리밍 + 배치(BATCH_SIZE)만큼만 들고 처리하도록 바꿔서 항상 메모리에는
+    배치 하나 분량만 남도록 했습니다.
 """
 
 import sys
 import os
-import json
 import time
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import ijson
 from opensearchpy import OpenSearch
 from opensearchpy.helpers import bulk
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 from core.config import settings
+from rag.retriever import _resolve_device
 
 # ===========================
 # 상수
@@ -46,21 +54,40 @@ def get_client() -> OpenSearch:
 # 임베딩 모델 로드
 # ===========================
 def load_embedding_model() -> SentenceTransformer:
-    print(f"[INFO] 임베딩 모델 로드 중: {settings.EMBEDDING_MODEL}")
-    model = SentenceTransformer(settings.EMBEDDING_MODEL)
+    device = _resolve_device(settings.EMBEDDING_DEVICE)
+    print(f"[INFO] 임베딩 모델 로드 중: {settings.EMBEDDING_MODEL} (device={device})")
+    model = SentenceTransformer(settings.EMBEDDING_MODEL, device=device)
     print(f"[SUCCESS] 임베딩 모델 로드 완료")
     return model
 
 
 # ===========================
-# 문서 데이터 로드
+# 문서 데이터 스트리밍 로드
 # ===========================
-def load_documents(path: str) -> list:
-    print(f"[INFO] 문서 로드 중: {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        documents = json.load(f)
-    print(f"[SUCCESS] {len(documents):,}개 문서 로드 완료")
-    return documents
+def iter_documents(path: str):
+    """파일 전체를 리스트로 올리지 않고, 문서를 하나씩 스트리밍으로 yield"""
+    with open(path, "rb") as f:
+        yield from ijson.items(f, "item")
+
+
+def count_documents(path: str) -> int:
+    """진행률 표시용 총 개수 — 값만 세므로 메모리에 거의 안 남음"""
+    print(f"[INFO] 문서 수 확인 중: {path}")
+    count = sum(1 for _ in iter_documents(path))
+    print(f"[SUCCESS] {count:,}개 문서 확인됨")
+    return count
+
+
+def batched(iterable, batch_size: int):
+    """이터레이터를 batch_size 크기 리스트로 묶어서 순서대로 yield"""
+    batch = []
+    for item in iterable:
+        batch.append(item)
+        if len(batch) == batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 # ===========================
@@ -130,20 +157,22 @@ def run():
     # 3. 임베딩 모델 로드
     model = load_embedding_model()
 
-    # 4. 문서 로드
-    documents = load_documents(RAG_DOCUMENTS_PATH)
+    # 4. 문서 개수 확인 (진행률 표시용, 스트리밍이라 메모리엔 안 쌓임)
+    total = count_documents(RAG_DOCUMENTS_PATH)
+    total_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
 
-    # 5. 배치 처리 & 적재
-    total = len(documents)
+    # 5. 배치 처리 & 적재 — 문서는 배치 단위로만 메모리에 올라옴
     success_count = 0
     error_count = 0
 
     print(f"\n[INFO] 총 {total:,}개 문서 적재 시작 (배치 크기: {BATCH_SIZE})")
     start_time = time.time()
 
-    for i in tqdm(range(0, total, BATCH_SIZE), desc="적재 중"):
-        batch_docs = documents[i:i + BATCH_SIZE]
-
+    for batch_docs in tqdm(
+        batched(iter_documents(RAG_DOCUMENTS_PATH), BATCH_SIZE),
+        total=total_batches,
+        desc="적재 중",
+    ):
         # 텍스트 추출 & 전처리
         texts = [preprocess_text(doc["text"]) for doc in batch_docs]
 
@@ -176,7 +205,9 @@ def run():
             error_count += len(errors) if errors else 0
 
         except Exception as e:
-            print(f"\n[ERROR] 배치 {i}~{i+BATCH_SIZE} 처리 중 오류: {e}")
+            first_id = valid_docs[0].get("doc_id", "?")
+            last_id = valid_docs[-1].get("doc_id", "?")
+            print(f"\n[ERROR] 배치(doc_id {first_id}~{last_id}) 처리 중 오류: {e}")
             error_count += len(valid_docs)
 
     # 6. 결과 출력
