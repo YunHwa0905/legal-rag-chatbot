@@ -20,9 +20,9 @@ on:
   workflow_dispatch:
 
   # 수동 배포 성공 후 아래 3줄의 주석을 해제하세요.
-  # push:
-  #   branches:
-  #     - main
+  push:
+    branches:
+      - main
 
 # 배포가 겹쳐 실행되지 않게 합니다 (동시에 두 번 빌드하면 디스크가 터집니다).
 concurrency:
