@@ -28,7 +28,7 @@ public class AuthService {
         User user = userDao.findByUsername(req.getUsername());
         if (user == null || !passwordEncoder.matches(req.getPassword(), user.getPassword()))
             throw new RuntimeException("아이디 또는 비밀번호가 올바르지 않습니다.");
-        String token = jwtUtil.generateToken(user.getUsername(), user.getAge());
+        String token = jwtUtil.generateToken(user.getId(), user.getUsername(), user.getAge());
         return new LoginResponse(token, user.getUsername(), user.getAge(), getAgeGroupLabel(user.getAge()));
     }
 
