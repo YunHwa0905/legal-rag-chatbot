@@ -605,6 +605,7 @@
         $('#logoutBtn').click(() => { localStorage.clear(); window.location.href = '/'; });
 
         let currentSessionId = null;
+        let sessionLoadSeq = 0;
 
         function renderSessionList(sessions) {
             const html = sessions.map(s => `
@@ -628,6 +629,7 @@
 
         function openSession(sessionId) {
             currentSessionId = sessionId;
+            const seq = ++sessionLoadSeq;
             $('#welcome').hide();
             $('#msgGroup').empty();
 
@@ -636,6 +638,7 @@
                 type: 'GET',
                 headers: { 'Authorization': 'Bearer ' + token },
                 success: function (messages) {
+                    if (seq !== sessionLoadSeq) return;   // 그 사이 다른 세션을 열었으면 이 응답은 버린다
                     messages.forEach(m => {
                         if (m.role === 'user') addUserMsg(m.content);
                         else addBotMsg(m.content, [], null);
@@ -647,6 +650,7 @@
 
         function startNewChat() {
             currentSessionId = null;
+            sessionLoadSeq++;   // 진행 중이던 openSession 응답이 있어도 무시되게 (새 대화 화면에 잘못 렌더링 방지)
             $('#msgGroup').empty();
             $('#welcome').show();
             loadSessions();   // active 표시 해제
