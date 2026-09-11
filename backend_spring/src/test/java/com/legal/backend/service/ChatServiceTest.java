@@ -78,9 +78,6 @@ class ChatServiceTest {
 
     @Test
     void chat_FastAPI_응답이_비어있으면_대화턴을_저장하지_않는다() {
-        ChatSession mine = new ChatSession(5L, 7L, "내 대화", null, null, null);
-        when(chatSessionDao.findById(5L)).thenReturn(mine);
-
         // WebClient의 post().uri().bodyValue().retrieve().bodyToMono(...).block() 체인이
         // 2xx이지만 빈 바디를 돌려주는 상황을 재현 — .block()이 예외 없이 null을 반환한다.
         when(webClient.post()
@@ -97,6 +94,9 @@ class ChatServiceTest {
 
         assertThrows(IllegalStateException.class, () -> chatService.chat(req, 7L, 20));
 
+        // 응답이 비어있으면 세션 조회/생성 자체가 일어나지 않아야 한다 (Finding 1: 순서 재배치)
+        verify(chatSessionDao, never()).findById(any());
+        verify(chatSessionDao, never()).insert(any());
         verify(chatMessageDao, never()).insert(any());
     }
 }

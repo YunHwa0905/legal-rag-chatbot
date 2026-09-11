@@ -31,4 +31,8 @@
         UPDATE chat_session SET deleted_at = NOW() WHERE id = #{id}
     </update>
 
+    <update id="touch">
+        UPDATE chat_session SET updated_at = NOW() WHERE id = #{id}
+    </update>
+
 </mapper>

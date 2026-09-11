@@ -607,10 +607,19 @@
         let currentSessionId = null;
         let sessionLoadSeq = 0;
 
+        function escapeHtml(str) {
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         function renderSessionList(sessions) {
             const html = sessions.map(s => `
                 <button type="button" class="session-item ${s.id === currentSessionId ? 'active' : ''}"
-                        data-session-id="${s.id}">${s.title}</button>
+                        data-session-id="${s.id}">${escapeHtml(s.title)}</button>
             `).join('');
             $('#sessionList').html(html);
         }
@@ -677,7 +686,7 @@
                     <div class="msg-avatar user">👤</div>
                     <div class="msg-content">
                         <div class="msg-name">${username}</div>
-                        <div class="bubble user">${text}</div>
+                        <div class="bubble user">${escapeHtml(text)}</div>
                     </div>
                 </div>`;
             $('#msgGroup').append(html);
@@ -714,7 +723,7 @@
                     <div class="msg-avatar bot">⚖️</div>
                     <div class="msg-content">
                         <div class="msg-name">LexAI</div>
-                        <div class="bubble bot">${text.replace(/\n/g, '<br>')}${sourcesHtml}</div>
+                        <div class="bubble bot">${escapeHtml(text).replace(/\n/g, '<br>')}${sourcesHtml}</div>
                     </div>
                 </div>`;
             $('#msgGroup').append(html);

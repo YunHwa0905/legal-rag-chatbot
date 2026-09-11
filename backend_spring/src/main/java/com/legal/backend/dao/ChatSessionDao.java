@@ -13,4 +13,5 @@ public interface ChatSessionDao {
     int insert(ChatSession session);
     int updateTitle(@Param("id") Long id, @Param("title") String title);
     int softDelete(@Param("id") Long id);
+    int touch(@Param("id") Long id);
 }

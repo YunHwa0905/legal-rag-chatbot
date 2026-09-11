@@ -32,8 +32,6 @@ public class ChatService {
     private ChatMessageDao chatMessageDao;
 
     public ChatResponse chat(ChatRequest req, Long userId, int age) {
-        ChatSession session = resolveSession(req.getSessionId(), userId, req.getQuestion());
-
         Map<String, Object> body = new HashMap<>();
         body.put("question", req.getQuestion());
         body.put("age", age);
@@ -50,7 +48,9 @@ public class ChatService {
             throw new IllegalStateException("FastAPI 응답이 비어 있습니다.");
         }
 
+        ChatSession session = resolveSession(req.getSessionId(), userId, req.getQuestion());
         persistTurn(session.getId(), req.getQuestion(), response);
+        chatSessionDao.touch(session.getId());
 
         response.setSessionId(session.getId());
         response.setSessionTitle(session.getTitle());
