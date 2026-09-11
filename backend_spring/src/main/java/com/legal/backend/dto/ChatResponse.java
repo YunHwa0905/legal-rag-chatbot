@@ -9,6 +9,9 @@ import java.util.List;
 @Setter
 public class ChatResponse {
 
+    private Long sessionId;
+    private String sessionTitle;
+
     private String answer;
 
     private List<SourceDocument> sources;
