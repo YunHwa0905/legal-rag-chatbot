@@ -15,10 +15,17 @@
     - unverified_citations : 답변에 나온 "OO법 제N조" 인용 중 컨텍스트에서 확인 안 되는 것
         (rag/citation.py로 자동 검증. 16건 평가에서 가장 자주 나온 환각 유형이라 자동화함)
 
-자동으로 측정되지 않는 것 (results/*.json에 answer로 남겨두고 사람이 채점):
-    - 답변의 사실 정확성
-    - 나이대에 맞는 말투/난이도 준수 여부
-    - (조문 번호가 아닌 형태의) 환각 — 절차명 오적용, 다른 법 혼동 등
+자동으로 측정되지만 "후보 찾기" 용도로만 쓰는 것 (judge.py, legal-exaone-official 사용):
+    - factual_correctness  : 답변의 사실 정확성 (참고 문서 및 법률 상식 기준)
+    - age_appropriate_tone : 나이대에 맞는 말투/난이도 준수 여부
+    - hallucination_free   : (조문 번호가 아닌 형태의) 환각 여부 — 절차명 오적용, 다른 법 혼동 등
+
+    ⚠️ 이 pass율 숫자는 정확도 지표가 아니다. legal-exaone-official은 소형 로컬 모델이라
+    "설명이 더 자세했으면 좋겠다"는 편향을 완전히 못 버려서, 지시를 정확히 지킨 답변도
+    fail로 잘못 채점하는 경우가 실측으로 확인됐다(judge.py 상단 주석 참고).
+    그래서 pass율은 참고만 하고, fail로 나온 케이스 목록을 사람이 직접 다시 읽는
+    "후보 찾기" 도구로만 쓴다. 결과 파일의 manual_score 칸에 사람이 직접 채점해서
+    비교해도 된다.
 """
 
 import sys
@@ -30,6 +37,7 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rag.pipeline import get_pipeline
+from judge import judge as llm_judge
 
 EVAL_SET_PATH = os.path.join(os.path.dirname(__file__), "eval_set.json")
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
@@ -63,6 +71,14 @@ def run():
 
         citation_check = result.get("citation_check", {"citations": [], "unverified": []})
 
+        print(f"  채점 중... (judge: legal-exaone-official)")
+        judge_result = llm_judge(
+            question=case["question"],
+            age_group_label=result["age_group_label"],
+            context=result.get("context", ""),
+            answer=result["answer"],
+        )
+
         record = {
             "id": case["id"],
             "question": case["question"],
@@ -77,7 +93,10 @@ def run():
             "citations": citation_check["citations"],
             "unverified_citations": citation_check["unverified"],
             "sources": sources,
-            # 사람이 채점해서 채워 넣는 칸 (1~5점 또는 pass/fail)
+            "context": result.get("context", ""),
+            # LLM(legal-exaone-official) 자동 채점 — 참고용, fail만 사람이 재확인 권장
+            "llm_judge": judge_result,
+            # 사람이 직접 채점하고 싶을 때 채워 넣는 칸 (1~5점 또는 pass/fail)
             "manual_score": {
                 "factual_correctness": None,
                 "age_appropriate_tone": None,
@@ -87,7 +106,11 @@ def run():
         results.append(record)
 
         flag = f" [미검증 인용 {len(citation_check['unverified'])}건]" if citation_check["unverified"] else ""
-        print(f"  검색결과 {len(sources)}건 / 분야일치율 {record['category_match_rate']:.0%} / {elapsed}s{flag}")
+        jf = judge_result.get("factual_correctness")
+        jt = judge_result.get("age_appropriate_tone")
+        jh = judge_result.get("hallucination_free")
+        judge_flag = f" [judge: 사실={jf} 말투={jt} 환각없음={jh}]" if jf is not None else " [judge 실패]"
+        print(f"  검색결과 {len(sources)}건 / 분야일치율 {record['category_match_rate']:.0%} / {elapsed}s{flag}{judge_flag}")
 
         # 중간 저장 — 도중에 죽어도 여기까지는 남음
         with open(out_path, "w", encoding="utf-8") as f:
@@ -95,6 +118,18 @@ def run():
 
     n = len(results)
     unverified_cases = [r for r in results if r["unverified_citations"]]
+
+    def _pass_rate(field):
+        judged = [r["llm_judge"][field] for r in results if r["llm_judge"][field] is not None]
+        if not judged:
+            return None, 0
+        return sum(1 for v in judged if v == "pass") / len(judged), len(judged)
+
+    fc_rate, fc_n = _pass_rate("factual_correctness")
+    tone_rate, tone_n = _pass_rate("age_appropriate_tone")
+    hall_rate, hall_n = _pass_rate("hallucination_free")
+    judge_failures = [r for r in results if r["llm_judge"]["factual_correctness"] is None]
+
     print(f"\n{'=' * 50}")
     print(f"총 {n}건 평가 완료 → {out_path}")
     print(f"평균 분야일치율: {sum(r['category_match_rate'] for r in results) / n:.0%}")
@@ -103,8 +138,26 @@ def run():
     print(f"미검증 인용:     {len(unverified_cases)}/{n}건에서 발견")
     for r in unverified_cases:
         print(f"  - [{r['id']}] {', '.join(r['unverified_citations'])}")
+    print(f"--- LLM 채점 (legal-exaone-official, ⚠️ pass율은 정확도 지표 아님 — 후보 찾기용) ---")
+    print(f"사실 정확성 pass율:   {fc_rate:.0%} ({fc_n}건 채점)" if fc_rate is not None else "사실 정확성: 채점 실패")
+    print(f"나이대 적합성 pass율: {tone_rate:.0%} ({tone_n}건 채점)" if tone_rate is not None else "나이대 적합성: 채점 실패")
+    print(f"환각 없음 pass율:     {hall_rate:.0%} ({hall_n}건 채점)" if hall_rate is not None else "환각 없음: 채점 실패")
+    if judge_failures:
+        print(f"채점 자체가 실패한 케이스: {len(judge_failures)}건 ({', '.join(r['id'] for r in judge_failures)})")
+    fail_cases = [
+        r for r in results
+        if r["llm_judge"]["factual_correctness"] == "fail"
+        or r["llm_judge"]["age_appropriate_tone"] == "fail"
+        or r["llm_judge"]["hallucination_free"] == "fail"
+    ]
+    if fail_cases:
+        print(f"사람이 다시 볼 후보 케이스 ({len(fail_cases)}건 — LLM이 fail 준 이유일 뿐, 실제 문제 여부는 직접 확인):")
+        for r in fail_cases:
+            j = r["llm_judge"]
+            print(f"  - [{r['id']}] 사실={j['factual_correctness']} 말투={j['age_appropriate_tone']} 환각없음={j['hallucination_free']} — {j['reason']}")
     print(f"{'=' * 50}")
-    print("→ 결과 파일의 manual_score 항목을 채워서 나머지 답변 품질을 사람이 채점하세요.")
+    print("→ 위 pass율은 참고만 하고, 후보 케이스 목록을 사람이 직접 읽어서 진짜 문제인지 판단하세요.")
+    print("  진짜 문제로 확인된 것만 결과 파일의 manual_score 항목에 남기세요.")
 
 
 if __name__ == "__main__":
