@@ -2,15 +2,20 @@ package com.legal.backend.service;
 
 import com.legal.backend.dao.ChatMessageDao;
 import com.legal.backend.dao.ChatSessionDao;
+import com.legal.backend.dto.ChatRequest;
+import com.legal.backend.dto.ChatResponse;
 import com.legal.backend.entity.ChatSession;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Answers;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.web.reactive.function.client.WebClient;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -20,6 +25,8 @@ class ChatServiceTest {
     private ChatSessionDao chatSessionDao;
     @Mock
     private ChatMessageDao chatMessageDao;
+    @Mock(answer = Answers.RETURNS_DEEP_STUBS)
+    private WebClient webClient;
 
     @InjectMocks
     private ChatService chatService;
@@ -67,5 +74,29 @@ class ChatServiceTest {
     @Test
     void buildTitle_짧은_질문은_그대로_쓴다() {
         assertEquals("짧은 질문", ChatService.buildTitle("짧은 질문"));
+    }
+
+    @Test
+    void chat_FastAPI_응답이_비어있으면_대화턴을_저장하지_않는다() {
+        ChatSession mine = new ChatSession(5L, 7L, "내 대화", null, null, null);
+        when(chatSessionDao.findById(5L)).thenReturn(mine);
+
+        // WebClient의 post().uri().bodyValue().retrieve().bodyToMono(...).block() 체인이
+        // 2xx이지만 빈 바디를 돌려주는 상황을 재현 — .block()이 예외 없이 null을 반환한다.
+        when(webClient.post()
+                .uri(anyString())
+                .bodyValue(any())
+                .retrieve()
+                .bodyToMono(ChatResponse.class)
+                .block())
+                .thenReturn(null);
+
+        ChatRequest req = new ChatRequest();
+        req.setQuestion("질문");
+        req.setSessionId(5L);
+
+        assertThrows(IllegalStateException.class, () -> chatService.chat(req, 7L, 20));
+
+        verify(chatMessageDao, never()).insert(any());
     }
 }

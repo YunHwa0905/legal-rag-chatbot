@@ -46,6 +46,10 @@ public class ChatService {
                 .bodyToMono(ChatResponse.class)
                 .block();
 
+        if (response == null) {
+            throw new IllegalStateException("FastAPI 응답이 비어 있습니다.");
+        }
+
         persistTurn(session.getId(), req.getQuestion(), response);
 
         response.setSessionId(session.getId());
