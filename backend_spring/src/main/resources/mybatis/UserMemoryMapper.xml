@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.legal.backend.dao.UserMemoryDao">
+
+    <select id="findByUser" resultType="UserMemory">
+        SELECT id, user_id AS userId, mem_key AS memKey, mem_value AS memValue,
+               source_message_id AS sourceMessageId, confidence,
+               confirmed_at AS confirmedAt, updated_at AS updatedAt
+        FROM user_memory
+        WHERE user_id = #{userId}
+        ORDER BY updated_at DESC
+    </select>
+
+    <select id="findById" resultType="UserMemory">
+        SELECT id, user_id AS userId, mem_key AS memKey, mem_value AS memValue,
+               source_message_id AS sourceMessageId, confidence,
+               confirmed_at AS confirmedAt, updated_at AS updatedAt
+        FROM user_memory
+        WHERE id = #{id}
+    </select>
+
+    <delete id="delete">
+        DELETE FROM user_memory WHERE id = #{id}
+    </delete>
+
+</mapper>
