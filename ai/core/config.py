@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     # ===========================
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "legal-gemma"
+    OLLAMA_REWRITE_MODEL: str = "gemma3:1b"
 
     # ===========================
     # 임베딩 모델 설정

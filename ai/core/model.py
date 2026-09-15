@@ -38,11 +38,16 @@ def check_ollama() -> bool:
 def generate(
     system_prompt: str,
     user_message: str,
+    model: str = None,
+    max_tokens: int = None,
+    temperature: float = None,
 ) -> str:
+    target_model = model or OLLAMA_MODEL
+
     if not check_ollama():
         raise RuntimeError(
             f"Ollama 서버에 연결할 수 없습니다: {OLLAMA_BASE_URL}\n"
-            f"'ollama run {OLLAMA_MODEL}' 명령어로 모델을 먼저 실행해주세요."
+            f"'ollama run {target_model}' 명령어로 모델을 먼저 실행해주세요."
         )
 
     # Gemma는 system role 미지원 → user 메시지에 합쳐서 전달
@@ -51,15 +56,15 @@ def generate(
     response = requests.post(
         f"{OLLAMA_BASE_URL}/api/chat",
         json={
-            "model": OLLAMA_MODEL,
+            "model": target_model,
             "messages": [
                 {"role": "user", "content": combined},
             ],
             "stream": False,
             "options": {
-                "temperature":    settings.TEMPERATURE,
+                "temperature":    temperature if temperature is not None else settings.TEMPERATURE,
                 "top_p":          settings.TOP_P,
-                "num_predict":    settings.MAX_NEW_TOKENS,
+                "num_predict":    max_tokens if max_tokens is not None else settings.MAX_NEW_TOKENS,
                 "repeat_penalty": 1.1,
                 "num_ctx":        4096,
             },
