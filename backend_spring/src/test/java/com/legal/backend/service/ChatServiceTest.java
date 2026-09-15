@@ -1,6 +1,5 @@
 package com.legal.backend.service;
 
-import com.legal.backend.dao.ChatMessageDao;
 import com.legal.backend.dao.ChatSessionDao;
 import com.legal.backend.dto.ChatRequest;
 import com.legal.backend.dto.ChatResponse;
@@ -24,7 +23,7 @@ class ChatServiceTest {
     @Mock
     private ChatSessionDao chatSessionDao;
     @Mock
-    private ChatMessageDao chatMessageDao;
+    private ChatMessagePersistenceService chatMessagePersistenceService;
     @Mock(answer = Answers.RETURNS_DEEP_STUBS)
     private WebClient webClient;
 
@@ -97,6 +96,6 @@ class ChatServiceTest {
         // 응답이 비어있으면 세션 조회/생성 자체가 일어나지 않아야 한다 (Finding 1: 순서 재배치)
         verify(chatSessionDao, never()).findById(any());
         verify(chatSessionDao, never()).insert(any());
-        verify(chatMessageDao, never()).insert(any());
+        verify(chatMessagePersistenceService, never()).persistTurn(any(), any(), any());
     }
 }

@@ -2,11 +2,14 @@
 <beans xmlns="http://www.springframework.org/schema/beans"
        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
        xmlns:context="http://www.springframework.org/schema/context"
+       xmlns:tx="http://www.springframework.org/schema/tx"
        xsi:schemaLocation="
            http://www.springframework.org/schema/beans
            http://www.springframework.org/schema/beans/spring-beans.xsd
            http://www.springframework.org/schema/context
-           http://www.springframework.org/schema/context/spring-context.xsd">
+           http://www.springframework.org/schema/context/spring-context.xsd
+           http://www.springframework.org/schema/tx
+           http://www.springframework.org/schema/tx/spring-tx.xsd">
 
     <context:property-placeholder location="classpath:db.properties"/>
 
@@ -23,6 +26,17 @@
         <property name="maximumPoolSize" value="10"/>
         <property name="connectionTimeout" value="30000"/>
     </bean>
+
+    <!--
+        Phase 0 최종 리뷰에서 발견된 갭: persistTurn의 user/assistant 두 INSERT가 트랜잭션 없이
+        따로 커밋됐다(원래 root-context.xml에 트랜잭션 매니저 자체가 없었음). 두 번째 INSERT만
+        실패하면 답 없는 orphan user 메시지가 남는 문제를 막기 위해 추가.
+        ChatMessagePersistenceService.persistTurn()의 @Transactional이 이 매니저를 사용한다.
+    -->
+    <bean id="transactionManager" class="org.springframework.jdbc.datasource.DataSourceTransactionManager">
+        <property name="dataSource" ref="dataSource"/>
+    </bean>
+    <tx:annotation-driven transaction-manager="transactionManager"/>
 
     <bean id="sqlSessionFactory" class="org.mybatis.spring.SqlSessionFactoryBean">
         <property name="dataSource" ref="dataSource"/>
