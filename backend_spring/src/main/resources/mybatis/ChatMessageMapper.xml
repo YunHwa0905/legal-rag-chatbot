@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.legal.backend.dao.ChatMessageDao">
+
+    <select id="findBySession" resultType="ChatMessage">
+        SELECT id, session_id AS sessionId, role, content,
+               standalone_query AS standaloneQuery, sources_json AS sourcesJson,
+               created_at AS createdAt
+        FROM chat_message
+        WHERE session_id = #{sessionId}
+        ORDER BY id ASC
+    </select>
+
+    <insert id="insert" parameterType="ChatMessage" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO chat_message (session_id, role, content, standalone_query, sources_json)
+        VALUES (#{sessionId}, #{role}, #{content}, #{standaloneQuery}, #{sourcesJson})
+    </insert>
+
+</mapper>

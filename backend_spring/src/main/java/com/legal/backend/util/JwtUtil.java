@@ -32,9 +32,10 @@ public class JwtUtil {
         this.key = Keys.hmacShaKeyFor(secret.getBytes());
     }
 
-    public String generateToken(String username, int age) {
+    public String generateToken(Long userId, String username, int age) {
         return Jwts.builder()
                 .setSubject(username)
+                .claim("uid", userId)
                 .claim("age", age)
                 .setIssuedAt(new Date())
                 .setExpiration(new Date(System.currentTimeMillis() + expiration))
@@ -44,6 +45,10 @@ public class JwtUtil {
 
     public String getUsername(String token) {
         return getClaims(token).getSubject();
+    }
+
+    public Long getUserId(String token) {
+        return getClaims(token).get("uid", Long.class);
     }
 
     public int getAge(String token) {

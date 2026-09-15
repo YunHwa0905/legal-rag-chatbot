@@ -21,9 +21,9 @@ public class ChatController {
             @RequestBody ChatRequest req,
             HttpServletRequest httpReq) {
         try {
-            String username = (String) httpReq.getAttribute("username");
-            int age          = (int)    httpReq.getAttribute("age");
-            ChatResponse response = chatService.chat(req, username, age);
+            Long userId = (Long) httpReq.getAttribute("userId");
+            int age      = (int)  httpReq.getAttribute("age");
+            ChatResponse response = chatService.chat(req, userId, age);
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             // 에러 로깅은 logback 이 담당

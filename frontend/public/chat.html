@@ -473,6 +473,27 @@
             text-align: right;
             margin-top: 6px;
         }
+
+        .session-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+            padding: 10px 12px;
+            margin-bottom: 4px;
+            border: none;
+            background: transparent;
+            border-radius: 8px;
+            font-size: 13px;
+            text-align: left;
+            cursor: pointer;
+            color: #374151;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .session-item:hover { background: #f3f4f6; }
+        .session-item.active { background: #e0e7ff; color: #4338ca; font-weight: 600; }
     </style>
 </head>
 <body>
@@ -496,6 +517,15 @@
     <div class="main">
         <!-- 사이드바 -->
         <div class="sidebar">
+            <div class="sidebar-title">대화</div>
+            <button class="example-btn" id="newChatBtn" style="font-weight:600;">
+                <span class="example-icon">➕</span>
+                <span>새 대화</span>
+            </button>
+            <div id="sessionList"></div>
+
+            <div class="sidebar-divider"></div>
+
             <div class="sidebar-title">예시 질문</div>
 
             <button class="example-btn" onclick="setExample(this)">
@@ -574,6 +604,75 @@
 
         $('#logoutBtn').click(() => { localStorage.clear(); window.location.href = '/'; });
 
+        let currentSessionId = null;
+        let sessionLoadSeq = 0;
+
+        function escapeHtml(str) {
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function renderSessionList(sessions) {
+            const html = sessions.map(s => `
+                <button type="button" class="session-item ${s.id === currentSessionId ? 'active' : ''}"
+                        data-session-id="${s.id}">${escapeHtml(s.title)}</button>
+            `).join('');
+            $('#sessionList').html(html);
+        }
+
+        function loadSessions() {
+            $.ajax({
+                url: '/api/chat/sessions',
+                type: 'GET',
+                headers: { 'Authorization': 'Bearer ' + token },
+                success: renderSessionList,
+                error: function (err) {
+                    if (err.status === 401) { localStorage.clear(); window.location.href = '/'; }
+                }
+            });
+        }
+
+        function openSession(sessionId) {
+            currentSessionId = sessionId;
+            const seq = ++sessionLoadSeq;
+            $('#welcome').hide();
+            $('#msgGroup').empty();
+
+            $.ajax({
+                url: '/api/chat/sessions/' + sessionId + '/messages',
+                type: 'GET',
+                headers: { 'Authorization': 'Bearer ' + token },
+                success: function (messages) {
+                    if (seq !== sessionLoadSeq) return;   // 그 사이 다른 세션을 열었으면 이 응답은 버린다
+                    messages.forEach(m => {
+                        if (m.role === 'user') addUserMsg(m.content);
+                        else addBotMsg(m.content, [], null);
+                    });
+                    loadSessions();   // active 표시 갱신
+                }
+            });
+        }
+
+        function startNewChat() {
+            currentSessionId = null;
+            sessionLoadSeq++;   // 진행 중이던 openSession 응답이 있어도 무시되게 (새 대화 화면에 잘못 렌더링 방지)
+            $('#msgGroup').empty();
+            $('#welcome').show();
+            loadSessions();   // active 표시 해제
+        }
+
+        $('#newChatBtn').click(startNewChat);
+
+        $('#sessionList').on('click', '.session-item', function () {
+            openSession($(this).data('session-id'));
+        });
+
+        loadSessions();
+
         function setExample(el) {
             const text = $(el).find('span').last().text();
             $('#question').val(text);
@@ -587,7 +686,7 @@
                     <div class="msg-avatar user">👤</div>
                     <div class="msg-content">
                         <div class="msg-name">${username}</div>
-                        <div class="bubble user">${text}</div>
+                        <div class="bubble user">${escapeHtml(text)}</div>
                     </div>
                 </div>`;
             $('#msgGroup').append(html);
@@ -624,7 +723,7 @@
                     <div class="msg-avatar bot">⚖️</div>
                     <div class="msg-content">
                         <div class="msg-name">LexAI</div>
-                        <div class="bubble bot">${text.replace(/\n/g, '<br>')}${sourcesHtml}</div>
+                        <div class="bubble bot">${escapeHtml(text).replace(/\n/g, '<br>')}${sourcesHtml}</div>
                     </div>
                 </div>`;
             $('#msgGroup').append(html);
@@ -669,11 +768,15 @@
                 type: 'POST',
                 contentType: 'application/json',
                 headers: { 'Authorization': 'Bearer ' + token },
-                data: JSON.stringify({ question, lawCategory: null }),
+                data: JSON.stringify({ question, lawCategory: null, sessionId: currentSessionId }),
                 success: function (res) {
                     $('#loadingRow').remove();
                     addBotMsg(res.answer, res.sources, res.age);
                     $('#sendBtn').prop('disabled', false);
+                    if (res.sessionId !== currentSessionId) {
+                        currentSessionId = res.sessionId;
+                    }
+                    loadSessions();
                 },
                 error: function (err) {
                     $('#loadingRow').remove();
