@@ -37,3 +37,6 @@ logs/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Native EnterWorktree scratch worktrees — never track these
+.claude/worktrees/
