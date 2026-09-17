@@ -3,7 +3,15 @@ API Request/Response 스키마 정의
 """
 
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Literal
+
+
+# ===========================
+# 대화 이력 한 턴
+# ===========================
+class HistoryTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
 
 
 # ===========================
@@ -16,7 +24,14 @@ class ChatRequest(BaseModel):
         None,
         description="법률 분야 필터 (민사법/형사법/행정법/지식재산권법)",
     )
-    session_id: Optional[str] = Field(None, description="세션 ID")
+    history: List[HistoryTurn] = Field(
+        default_factory=list,
+        description="최근 대화 이력(최근 2턴). 세션이 없거나 첫 질문이면 빈 리스트",
+    )
+    summary: Optional[str] = Field(
+        None,
+        description="이전 대화 롤링 요약. 없으면 null",
+    )
 
     class Config:
         json_schema_extra = {
@@ -24,7 +39,8 @@ class ChatRequest(BaseModel):
                 "question": "계약서에 도장 안 찍으면 어떻게 되나요?",
                 "age": 8,
                 "law_category": None,
-                "session_id": "user_123",
+                "history": [],
+                "summary": None,
             }
         }
 
@@ -47,6 +63,25 @@ class ChatResponse(BaseModel):
     age_group_label: str
     question: str
     age: int
+    standalone_query: Optional[str] = Field(
+        None, description="재작성된 질문. 재작성이 실행되지 않았으면 null"
+    )
+    rewrite_applied: bool = Field(False, description="재작성이 실행됐는지 여부")
+
+
+# ===========================
+# 대화 요약 갱신
+# ===========================
+class SummaryUpdateRequest(BaseModel):
+    session_id: int
+    prev_summary: Optional[str] = None
+    turns_to_fold: List[HistoryTurn]
+    through_message_id: int
+
+
+class SummaryUpdateResponse(BaseModel):
+    summary: str
+    through_message_id: int
 
 
 # ===========================
