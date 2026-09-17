@@ -80,11 +80,48 @@ CONTEXT_MAX_LEN = {
     "senior": 1500,
 }
 
+# === 이력·요약 하드 캡 — 4096 토큰 예산 안에서 강제로 자른다(추정이 아니라 실제 컷) ===
+SUMMARY_MAX_LEN = 300
+HISTORY_TURNS_MAX = 1          # 최근 1턴(user+assistant 페어) = 메시지 2개
+HISTORY_TURN_MAX_LEN = 250
+
+
+def _cap_summary(summary: str) -> str:
+    if not summary:
+        return None
+    return summary if len(summary) <= SUMMARY_MAX_LEN else summary[:SUMMARY_MAX_LEN] + "..."
+
+
+def _cap_history(history: list) -> list:
+    if not history:
+        return []
+    # 오래된 턴부터 버림 → 최근 HISTORY_TURNS_MAX*2 메시지만 유지
+    recent = history[-(HISTORY_TURNS_MAX * 2):]
+    capped = []
+    for turn in recent:
+        content = turn["content"]
+        if len(content) > HISTORY_TURN_MAX_LEN:
+            content = content[:HISTORY_TURN_MAX_LEN] + "..."
+        capped.append({"role": turn["role"], "content": content})
+    return capped
+
+
+def _format_history_block(history: list) -> str:
+    if not history:
+        return ""
+    lines = []
+    for turn in history:
+        speaker = "사용자" if turn["role"] == "user" else "챗봇"
+        lines.append(f"{speaker}: {turn['content']}")
+    return "[이전 대화]\n" + "\n".join(lines) + "\n\n"
+
 
 def build_prompt(
     question: str,
     context: str,
     age: int,
+    summary: str = None,
+    history: list = None,
 ) -> dict:
     age_group = get_age_group(age)
     system_prompt = SYSTEM_PROMPTS[age_group]
@@ -94,7 +131,13 @@ def build_prompt(
     if len(context) > max_len:
         context = context[:max_len] + "..."
 
-    user_message = f"""[참고 내용]
+    capped_summary = _cap_summary(summary)
+    capped_history = _cap_history(history)
+
+    summary_block = f"[이전 대화 요약]\n{capped_summary}\n\n" if capped_summary else ""
+    history_block = _format_history_block(capped_history)
+
+    user_message = f"""{summary_block}{history_block}[참고 내용]
 {context}
 
 [질문]
@@ -106,6 +149,41 @@ def build_prompt(
         "age_group": age_group,
         "age_group_label": AGE_GROUP_LABEL[age_group],
     }
+
+
+def test_backward_compat_and_caps():
+    context = "[문서 1] (민사법 - 법령)\n가압류는 ..."
+
+    # 하위 호환: summary/history 없으면 기존과 100% 동일한 user 문자열
+    old_style = f"""[참고 내용]
+{context}
+
+[질문]
+가압류가 뭐야?"""
+    prompt = build_prompt("가압류가 뭐야?", context, 25)
+    assert prompt["user"] == old_style, "summary/history 없으면 기존 출력과 동일해야 함"
+    print("[PASS] 하위 호환 — summary/history 없을 때 기존과 동일한 user 문자열")
+
+    # 요약 300자 컷
+    long_summary = "가" * 400
+    prompt = build_prompt("질문", context, 25, summary=long_summary)
+    assert "..." in prompt["user"]
+    assert len(long_summary[:300]) == 300
+    assert prompt["user"].count("가") <= 303  # 300자 + "..." 안의 "가" 없음이지만 여유 있게 체크
+    print("[PASS] 요약 300자 하드 캡")
+
+    # 이력 최근 2턴만 유지(오래된 턴부터 버림), 각 턴 250자 컷
+    history = [
+        {"role": "user", "content": "1번째 질문"},
+        {"role": "assistant", "content": "1번째 답변"},
+        {"role": "user", "content": "2번째 질문"},
+        {"role": "assistant", "content": "나" * 300},
+    ]
+    prompt = build_prompt("질문", context, 25, history=history)
+    assert "1번째 질문" not in prompt["user"], "3턴째부터는 최근 2턴만 남아야 함(오래된 턴 버림)"
+    assert "2번째 질문" in prompt["user"]
+    assert ("나" * 250 + "...") in prompt["user"], "턴당 250자 초과분은 컷돼야 함"
+    print("[PASS] 이력 최근 2턴 + 턴당 250자 하드 캡")
 
 
 def test():
@@ -123,4 +201,5 @@ def test():
 
 
 if __name__ == "__main__":
+    test_backward_compat_and_caps()
     test()
