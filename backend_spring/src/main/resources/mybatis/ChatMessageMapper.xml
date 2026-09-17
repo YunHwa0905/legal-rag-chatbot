@@ -12,6 +12,33 @@
         ORDER BY id ASC
     </select>
 
+    <!--
+        최근 limit개를 id DESC로 뽑은 뒤 다시 ASC로 정렬 — MySQL은 LIMIT 뒤에
+        곧바로 다시 정렬할 수 없어 서브쿼리(derived table)로 감싼다.
+    -->
+    <select id="findRecentMessages" resultType="ChatMessage">
+        SELECT id, session_id AS sessionId, role, content,
+               standalone_query AS standaloneQuery, sources_json AS sourcesJson,
+               created_at AS createdAt
+        FROM (
+            SELECT id, session_id, role, content, standalone_query, sources_json, created_at
+            FROM chat_message
+            WHERE session_id = #{sessionId}
+            ORDER BY id DESC
+            LIMIT #{limit}
+        ) recent
+        ORDER BY id ASC
+    </select>
+
+    <select id="findAfterMessageId" resultType="ChatMessage">
+        SELECT id, session_id AS sessionId, role, content,
+               standalone_query AS standaloneQuery, sources_json AS sourcesJson,
+               created_at AS createdAt
+        FROM chat_message
+        WHERE session_id = #{sessionId} AND id > #{afterId}
+        ORDER BY id ASC
+    </select>
+
     <insert id="insert" parameterType="ChatMessage" useGeneratedKeys="true" keyProperty="id">
         INSERT INTO chat_message (session_id, role, content, standalone_query, sources_json)
         VALUES (#{sessionId}, #{role}, #{content}, #{standaloneQuery}, #{sourcesJson})

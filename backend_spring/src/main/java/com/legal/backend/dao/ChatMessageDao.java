@@ -9,5 +9,7 @@ import java.util.List;
 @Mapper
 public interface ChatMessageDao {
     List<ChatMessage> findBySession(@Param("sessionId") Long sessionId);
+    List<ChatMessage> findRecentMessages(@Param("sessionId") Long sessionId, @Param("limit") int limit);
+    List<ChatMessage> findAfterMessageId(@Param("sessionId") Long sessionId, @Param("afterId") long afterId);
     int insert(ChatMessage message);
 }
