@@ -37,10 +37,15 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rag.pipeline import get_pipeline
+import rag.rewrite as rewrite
 from judge import judge as llm_judge
 
 EVAL_SET_PATH = os.path.join(os.path.dirname(__file__), "eval_set.json")
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
+
+# EVAL_DISABLE_REWRITE=1 로 실행하면 재작성을 강제로 끈 상태로 같은 eval_set을 돌릴 수 있다.
+# 재작성 有/無 결과 파일 두 개를 비교해서 judge 점수·환각율 차이를 본다(스펙 §11).
+DISABLE_REWRITE = os.getenv("EVAL_DISABLE_REWRITE") == "1"
 
 
 def run():
@@ -48,6 +53,11 @@ def run():
         cases = json.load(f)
 
     pipeline = get_pipeline()
+
+    if DISABLE_REWRITE:
+        print("[INFO] EVAL_DISABLE_REWRITE=1 — 재작성을 강제로 끄고 실행합니다.")
+        rewrite.needs_rewrite = lambda question, history: False
+
     results = []
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -59,7 +69,7 @@ def run():
         print(f"\n[{case['id']}] {case['question']} (age={case['age']})")
 
         start = time.time()
-        result = pipeline.run(question=case["question"], age=case["age"])
+        result = pipeline.run(question=case["question"], age=case["age"], history=case.get("history", []))
         elapsed = round(time.time() - start, 2)
 
         sources = result["sources"]
@@ -93,6 +103,8 @@ def run():
             "citations": citation_check["citations"],
             "unverified_citations": citation_check["unverified"],
             "sources": sources,
+            "standalone_query": result.get("standalone_query"),
+            "rewrite_applied": result.get("rewrite_applied", False),
             "context": result.get("context", ""),
             # LLM(legal-exaone-official) 자동 채점 — 참고용, fail만 사람이 재확인 권장
             "llm_judge": judge_result,
@@ -106,11 +118,12 @@ def run():
         results.append(record)
 
         flag = f" [미검증 인용 {len(citation_check['unverified'])}건]" if citation_check["unverified"] else ""
+        rewrite_flag = f" [재작성: {result['standalone_query']}]" if result.get("rewrite_applied") else ""
         jf = judge_result.get("factual_correctness")
         jt = judge_result.get("age_appropriate_tone")
         jh = judge_result.get("hallucination_free")
         judge_flag = f" [judge: 사실={jf} 말투={jt} 환각없음={jh}]" if jf is not None else " [judge 실패]"
-        print(f"  검색결과 {len(sources)}건 / 분야일치율 {record['category_match_rate']:.0%} / {elapsed}s{flag}{judge_flag}")
+        print(f"  검색결과 {len(sources)}건 / 분야일치율 {record['category_match_rate']:.0%} / {elapsed}s{flag}{rewrite_flag}{judge_flag}")
 
         # 중간 저장 — 도중에 죽어도 여기까지는 남음
         with open(out_path, "w", encoding="utf-8") as f:
