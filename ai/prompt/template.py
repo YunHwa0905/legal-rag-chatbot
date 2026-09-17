@@ -82,7 +82,7 @@ CONTEXT_MAX_LEN = {
 
 # === 이력·요약 하드 캡 — 4096 토큰 예산 안에서 강제로 자른다(추정이 아니라 실제 컷) ===
 SUMMARY_MAX_LEN = 300
-HISTORY_TURNS_MAX = 1          # 최근 1턴(user+assistant 페어) = 메시지 2개
+HISTORY_TURNS_MAX = 2          # 최근 2턴(user+assistant 페어) = 메시지 4개
 HISTORY_TURN_MAX_LEN = 250
 
 
@@ -173,14 +173,18 @@ def test_backward_compat_and_caps():
     print("[PASS] 요약 300자 하드 캡")
 
     # 이력 최근 2턴만 유지(오래된 턴부터 버림), 각 턴 250자 컷
+    # 3턴 데이터를 입력하면 가장 오래된 턴이 버려지고 최근 2턴만 남는다
     history = [
+        {"role": "user", "content": "0번째 질문"},
+        {"role": "assistant", "content": "0번째 답변"},
         {"role": "user", "content": "1번째 질문"},
         {"role": "assistant", "content": "1번째 답변"},
         {"role": "user", "content": "2번째 질문"},
         {"role": "assistant", "content": "나" * 300},
     ]
     prompt = build_prompt("질문", context, 25, history=history)
-    assert "1번째 질문" not in prompt["user"], "3턴째부터는 최근 2턴만 남아야 함(오래된 턴 버림)"
+    assert "0번째 질문" not in prompt["user"], "3턴째부터는 최근 2턴만 남아야 함(오래된 턴 버림)"
+    assert "1번째 질문" in prompt["user"]
     assert "2번째 질문" in prompt["user"]
     assert ("나" * 250 + "...") in prompt["user"], "턴당 250자 초과분은 컷돼야 함"
     print("[PASS] 이력 최근 2턴 + 턴당 250자 하드 캡")
