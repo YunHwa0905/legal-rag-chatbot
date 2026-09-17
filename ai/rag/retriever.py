@@ -266,15 +266,20 @@ class LegalRetriever:
     # 합산해 온 것과 같은 원리를 재작성/원본 두 질의에도 적용.
     # queries가 원소 1개면 _hybrid_search와 완전히 동일하게 동작한다.
     #
-    # 두 가지를 채널 누적과 분리해서 마지막에 한 번에 처리한다:
-    # (1) 쿼리 개수로 나누기 — 안 그러면 쿼리 2개일 때 점수가 대략 2배가 돼
-    #     RAG_MIN_SCORE가 재작성된 턴에서만 사실상 절반으로 느슨해진다.
-    # (2) 타이틀 보너스를 모든 쿼리 누적이 끝난 뒤 완성된 scores 딕셔너리에
-    #     쿼리마다 한 번씩만 적용 — 예전엔 루프 안에서 적용해서, 먼저(원본
-    #     쿼리로) 들어온 문서는 이후 쿼리 순회 때마다 보너스를 또 받고
-    #     재작성 쿼리에서만 새로 발견된 문서는 한 번만 받는 비대칭이 있었다.
-    #     재작성 채널이 찾으려는 바로 그 문서들이 구조적으로 불리해지는 문제.
-    # queries가 1개면 두 조정 모두 사실상 no-op이라 기존 결과와 동일하다.
+    # 세 단계로 나눠서 마지막에 한 번에 정규화한다:
+    # (1) 모든 쿼리의 채널 점수를 먼저 전부 누적.
+    # (2) 타이틀 보너스를 완성된 scores 딕셔너리에 쿼리마다 한 번씩만 적용 —
+    #     예전엔 루프 안에서 적용해서, 먼저(원본 쿼리로) 들어온 문서는 이후
+    #     쿼리 순회 때마다 보너스를 또 받고 재작성 쿼리에서만 새로 발견된
+    #     문서는 한 번만 받는 비대칭이 있었다. 재작성 채널이 찾으려는 바로
+    #     그 문서들이 구조적으로 불리해지는 문제.
+    # (3) 채널 점수 + 보너스를 합친 최종 점수를 쿼리 개수로 나누기 — 안 그러면
+    #     쿼리 2개일 때 점수가 대략 2배가 돼 RAG_MIN_SCORE가 재작성된 턴에서만
+    #     사실상 절반으로 느슨해진다. 보너스를 나누기 *전에* 더해야 한다 —
+    #     나눈 뒤에 더하면 보너스만 쿼리 개수만큼 배로 부풀어 같은 문제가
+    #     보너스 쪽에 그대로 남는다.
+    # queries가 1개면 나누기 자체를 건너뛰어(스킵, 1로 나누기가 아니라) 기존
+    # 결과와 완전히 동일하다.
     # ===========================
     def search_multi(self, queries: list, law_category: str = None) -> list:
         pool_size = max(self.top_k * 5, 30)
@@ -288,12 +293,12 @@ class LegalRetriever:
             _accumulate_channel(knn_results, scores, docs)
             _accumulate_channel(bm25_results, scores, docs)
 
+        for query_text in queries:
+            _apply_title_bonus(query_text, scores, docs)
+
         if len(queries) > 1:
             for doc_id in scores:
                 scores[doc_id] /= len(queries)
-
-        for query_text in queries:
-            _apply_title_bonus(query_text, scores, docs)
 
         return _finalize(scores, docs, self.top_k, self.min_score)
 

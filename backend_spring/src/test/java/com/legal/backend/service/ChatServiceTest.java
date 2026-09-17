@@ -17,6 +17,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import java.time.Duration;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -97,7 +98,7 @@ class ChatServiceTest {
                 .bodyValue(any())
                 .retrieve()
                 .bodyToMono(ChatResponse.class)
-                .block())
+                .block(any(Duration.class)))
                 .thenReturn(null);
 
         ChatRequest req = new ChatRequest();
@@ -132,7 +133,7 @@ class ChatServiceTest {
                 .bodyValue(any())
                 .retrieve()
                 .bodyToMono(ChatResponse.class)
-                .block())
+                .block(any(Duration.class)))
                 .thenReturn(fastApiResponse);
 
         ChatRequest req = new ChatRequest();
@@ -158,7 +159,7 @@ class ChatServiceTest {
                 .bodyValue(any())
                 .retrieve()
                 .bodyToMono(ChatResponse.class)
-                .block())
+                .block(any(Duration.class)))
                 .thenReturn(fastApiResponse);
 
         ChatRequest req = new ChatRequest();
@@ -186,7 +187,7 @@ class ChatServiceTest {
                 .bodyValue(any())
                 .retrieve()
                 .bodyToMono(ChatResponse.class)
-                .block())
+                .block(any(Duration.class)))
                 .thenReturn(fastApiResponse);
         doThrow(new java.util.concurrent.RejectedExecutionException("큐 꽉 참"))
                 .when(chatMemoryAsyncService).updateSummaryIfNeeded(any());

@@ -14,6 +14,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -27,6 +28,11 @@ public class ChatService {
     private static final int TITLE_MAX_LEN = 20;
     // 최근 2턴(user+assistant 페어) = 메시지 4개. 스펙 §3의 HISTORY_WINDOW_TURNS=2.
     private static final int HISTORY_WINDOW_MESSAGES = 4;
+
+    // N4: 응답 없는 FastAPI/Ollama 하나가 요청 스레드를 무기한 붙잡는 걸 막는다.
+    // Caddy read_timeout(300s)보다 넉넉히 짧게 잡아, 정상적인 느린 생성(장문 답변)은
+    // 통과시키되 진짜로 멈춘 연결은 여기서 먼저 끊는다.
+    private static final Duration FASTAPI_CALL_TIMEOUT = Duration.ofSeconds(180);
 
     @Autowired
     private WebClient webClient;
@@ -59,7 +65,7 @@ public class ChatService {
                 .bodyValue(body)
                 .retrieve()
                 .bodyToMono(ChatResponse.class)
-                .block();
+                .block(FASTAPI_CALL_TIMEOUT);
 
         if (response == null) {
             throw new IllegalStateException("FastAPI 응답이 비어 있습니다.");

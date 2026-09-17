@@ -2,12 +2,10 @@ package com.legal.backend.dao;
 
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
-import org.xml.sax.InputSource;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.File;
-import java.io.FileReader;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Stream;
@@ -59,8 +57,10 @@ class MyBatisMapperXmlTest {
         factory.setValidating(false);
         factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
         DocumentBuilder builder = factory.newDocumentBuilder();
-        try (FileReader reader = new FileReader(file)) {
-            builder.parse(new InputSource(reader));
-        }
+        // File을 바로 넘긴다(Reader로 감싸지 않음) — Reader를 쓰면 플랫폼 기본 인코딩으로
+        // 미리 디코딩되면서 파일 자체의 <?xml ... encoding="UTF-8"?> 선언이 무시된다.
+        // MyBatis는 Resource.getInputStream()으로 바이트를 읽고 그 선언을 그대로 따르므로,
+        // 이 테스트도 같은 방식(바이트 스트림)으로 파싱해야 실제 운영 경로와 같은 걸 검증한다.
+        builder.parse(file);
     }
 }

@@ -14,7 +14,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.model import generate
 from core.config import settings
-from core.context_caps import cap_history, cap_summary, format_turns
+from core.context_caps import cap_history, cap_summary, format_turns, sanitize
 
 
 _DEMONSTRATIVES = [
@@ -52,7 +52,7 @@ def rewrite_query(question: str, history: list, summary: str = None) -> str:
 {format_turns(capped_history)}
 
 [새 질문]
-{question}
+{sanitize(question)}
 """
     return generate(
         system_prompt="",

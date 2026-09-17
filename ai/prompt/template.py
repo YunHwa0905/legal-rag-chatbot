@@ -12,6 +12,7 @@ from core.context_caps import (
     HISTORY_TURN_MAX_LEN,
     cap_summary,
     cap_history,
+    sanitize,
 )
 
 
@@ -138,7 +139,7 @@ def build_prompt(
 {context}
 
 [질문]
-{question}"""
+{sanitize(question)}"""
 
     return {
         "system": system_prompt,
