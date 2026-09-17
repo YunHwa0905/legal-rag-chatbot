@@ -12,6 +12,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rag.retriever import LegalRetriever
 from rag.citation import verify_citations
+import rag.rewrite as rewrite
 from prompt.template import build_prompt
 from core.model import generate
 
@@ -34,12 +35,16 @@ class LegalRAGPipeline:
         question: str,
         age: int,
         law_category: str = None,
+        history: list = None,
+        summary: str = None,
     ) -> dict:
         """
         Args:
             question: 사용자 질문
             age: 사용자 나이
             law_category: 법률 분야 필터 (선택)
+            history: 최근 대화 이력 [{"role": "user"|"assistant", "content": str}, ...] (선택)
+            summary: 이전 대화 롤링 요약 (선택)
 
         Returns:
             {
@@ -47,15 +52,28 @@ class LegalRAGPipeline:
                 "sources": 참조 문서 목록,
                 "age_group_label": 나이대 레이블,
                 "context": 검색된 컨텍스트,
-                "citation_check": {"citations": [...], "unverified": [...]}
+                "citation_check": {"citations": [...], "unverified": [...]},
+                "standalone_query": 재작성된 질문 (재작성 안 했으면 None),
+                "rewrite_applied": 재작성이 실행됐는지 여부
             }
         """
+        history = history or []
 
         # ===========================
-        # Step 1. RAG 검색
+        # Step 1. 질문 재작성 게이트 + (필요 시) 재작성
         # ===========================
+        rewrite_applied = rewrite.needs_rewrite(question, history)
+        standalone_query = None
+        if rewrite_applied:
+            standalone_query = rewrite.rewrite_query(question, history, summary)
+            print(f"[INFO] 질문 재작성: '{question}' → '{standalone_query}'")
+
+        # ===========================
+        # Step 2. 이중 채널 검색 (재작성 안 했으면 원본 질문 하나로만 — 기존과 동일)
+        # ===========================
+        queries = [question, standalone_query] if rewrite_applied else [question]
         print(f"[INFO] 검색 중: {question[:30]}...")
-        results = self.retriever.search(question, law_category)
+        results = self.retriever.search_multi(queries, law_category)
 
         if not results:
             return {
@@ -64,22 +82,25 @@ class LegalRAGPipeline:
                 "age_group_label": "",
                 "context": "",
                 "citation_check": {"citations": [], "unverified": []},
+                "standalone_query": standalone_query,
+                "rewrite_applied": rewrite_applied,
             }
 
-        # 검색 결과 → 컨텍스트 텍스트 변환
-        context = self.retriever.get_context(question, law_category)
+        context = self.retriever.format_context(results)
 
         # ===========================
-        # Step 2. 나이대별 프롬프트 구성
+        # Step 3. 나이대별 프롬프트 구성 (요약·이력 포함, 하드 캡 적용)
         # ===========================
         prompt = build_prompt(
             question=question,
             context=context,
             age=age,
+            summary=summary,
+            history=history,
         )
 
         # ===========================
-        # Step 3. LLM 추론
+        # Step 4. LLM 추론
         # ===========================
         print(f"[INFO] 답변 생성 중... (나이대: {prompt['age_group_label']})")
         answer = generate(
@@ -88,7 +109,7 @@ class LegalRAGPipeline:
         )
 
         # ===========================
-        # Step 4. 인용 조문 검증
+        # Step 5. 인용 조문 검증
         #
         # 컨텍스트에 없는 "OO법 제N조" 인용은 모델이 지어냈을 가능성이 높음
         # (eval에서 반복 확인된 환각 패턴). 못 찾은 인용이 있으면 답변에
@@ -105,7 +126,7 @@ class LegalRAGPipeline:
             )
 
         # ===========================
-        # Step 5. 출처 정리
+        # Step 6. 출처 정리
         # ===========================
         sources = [
             {
@@ -125,6 +146,8 @@ class LegalRAGPipeline:
             "age_group_label": prompt["age_group_label"],
             "context": context,
             "citation_check": citation_check,
+            "standalone_query": standalone_query,
+            "rewrite_applied": rewrite_applied,
         }
 
 
@@ -164,12 +187,30 @@ def test():
         )
 
         print(f"나이대: {result['age_group_label']}")
+        print(f"재작성 적용: {result['rewrite_applied']}")
         print(f"\n[답변]")
         print(result["answer"])
         print(f"\n[참조 문서]")
         for src in result["sources"]:
             print(f"  - {src['law_category']} / {src['doc_type']} (점수: {src['score']})")
             print(f"    {src['preview']}")
+
+    # --- 멀티턴: 재작성 게이트가 실제로 걸리는 케이스 ---
+    print(f"\n{'='*60}")
+    print("멀티턴 케이스 — 재작성 동작 확인")
+    print(f"{'='*60}")
+    history = [
+        {"role": "user", "content": "전세 계약 갱신을 거부당했어요"},
+        {"role": "assistant", "content": "임대인은 정당한 사유 없이 갱신을 거부할 수 없습니다."},
+    ]
+    result = pipeline.run(
+        question="그럼 계약금은 어떻게 되나요?",
+        age=28,
+        history=history,
+    )
+    print(f"재작성 적용: {result['rewrite_applied']}")
+    print(f"재작성된 질문: {result['standalone_query']}")
+    print(f"\n[답변]\n{result['answer']}")
 
 
 if __name__ == "__main__":
