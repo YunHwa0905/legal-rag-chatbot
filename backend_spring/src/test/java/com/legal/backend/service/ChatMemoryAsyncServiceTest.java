@@ -12,6 +12,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -60,7 +61,7 @@ class ChatMemoryAsyncServiceTest {
                 .bodyValue(any())
                 .retrieve()
                 .bodyToMono(Map.class)
-                .block())
+                .block(any(Duration.class)))
                 .thenReturn(Map.of("summary", "새 요약", "through_message_id", 6));
 
         chatMemoryAsyncService.updateSummaryIfNeeded(5L);
@@ -81,7 +82,7 @@ class ChatMemoryAsyncServiceTest {
                 .bodyValue(any())
                 .retrieve()
                 .bodyToMono(Map.class)
-                .block())
+                .block(any(Duration.class)))
                 .thenReturn(null);
 
         assertThrows(IllegalStateException.class,

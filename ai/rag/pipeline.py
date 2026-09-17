@@ -65,8 +65,15 @@ class LegalRAGPipeline:
         rewrite_applied = rewrite.needs_rewrite(question, history)
         standalone_query = None
         if rewrite_applied:
-            standalone_query = rewrite.rewrite_query(question, history, summary)
-            print(f"[INFO] 질문 재작성: '{question}' → '{standalone_query}'")
+            # 재작성 모델(OLLAMA_REWRITE_MODEL) 호출은 이 엔드포인트에 새로 추가된
+            # 두 번째 LLM 의존성이다. 이게 실패한다고 답변 자체가 막히면 안 된다 —
+            # 실패 시 원본 질문 단일 채널로 조용히 저하시킨다(단일턴과 동일 동작).
+            try:
+                standalone_query = rewrite.rewrite_query(question, history, summary)
+                print(f"[INFO] 질문 재작성: '{question}' → '{standalone_query}'")
+            except Exception as e:
+                print(f"[WARN] 질문 재작성 실패 — 원본 질문으로 진행: {e}")
+                rewrite_applied, standalone_query = False, None
 
         # ===========================
         # Step 2. 이중 채널 검색 (재작성 안 했으면 원본 질문 하나로만 — 기존과 동일)

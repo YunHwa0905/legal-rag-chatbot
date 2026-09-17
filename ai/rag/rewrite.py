@@ -14,6 +14,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.model import generate
 from core.config import settings
+from core.context_caps import cap_history, cap_summary, format_turns
 
 
 _DEMONSTRATIVES = [
@@ -33,24 +34,22 @@ def needs_rewrite(question: str, history: list) -> bool:
     return len(question.strip()) < MIN_STANDALONE_LEN
 
 
-def _format_history(history: list) -> str:
-    lines = []
-    for turn in history:
-        speaker = "사용자" if turn["role"] == "user" else "챗봇"
-        lines.append(f"{speaker}: {turn['content']}")
-    return "\n".join(lines)
-
-
 def rewrite_query(question: str, history: list, summary: str = None) -> str:
+    # I2: history/summary가 여기서도 하드캡 없이 통째로 프롬프트에 들어가면
+    # 재작성용 경량 모델의 컨텍스트 예산을 넘길 수 있었다 — build_prompt와
+    # 동일한 캡을 적용해 상한을 맞춘다(1턴짜리 재작성 요청이라 캡이 있어도
+    # 정상 케이스의 정보 손실은 없다).
+    capped_history = cap_history(history)
+    capped_summary = cap_summary(summary)
     prompt = f"""다음은 이전 대화 요약과 최근 대화, 그리고 사용자의 새 질문이다.
 새 질문을 이전 대화 없이도 이해할 수 있는 완전한 질문 하나로 다시 써라.
 새로운 정보를 추가하지 말고, 이전 대화에 없는 단어를 넣지 마라. 재작성한 질문만 출력하라.
 
 [요약]
-{summary or '없음'}
+{capped_summary or '없음'}
 
 [최근 대화]
-{_format_history(history)}
+{format_turns(capped_history)}
 
 [새 질문]
 {question}

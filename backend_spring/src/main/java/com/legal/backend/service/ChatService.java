@@ -8,6 +8,8 @@ import com.legal.backend.dto.ChatResponse;
 import com.legal.backend.entity.ChatMessage;
 import com.legal.backend.entity.ChatSession;
 import com.legal.backend.entity.ChatSessionSummary;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -19,6 +21,8 @@ import java.util.Map;
 
 @Service
 public class ChatService {
+
+    private static final Logger log = LoggerFactory.getLogger(ChatService.class);
 
     private static final int TITLE_MAX_LEN = 20;
     // 최근 2턴(user+assistant 페어) = 메시지 4개. 스펙 §3의 HISTORY_WINDOW_TURNS=2.
@@ -64,11 +68,26 @@ public class ChatService {
         ChatSession session = resolveSession(req.getSessionId(), userId, req.getQuestion());
         chatMessagePersistenceService.persistTurn(session.getId(), req.getQuestion(), response);
         chatSessionDao.touch(session.getId());
-        chatMemoryAsyncService.updateSummaryIfNeeded(session.getId());
+        triggerSummaryUpdate(session.getId());
 
         response.setSessionId(session.getId());
         response.setSessionTitle(session.getTitle());
         return response;
+    }
+
+    /**
+     * 이 시점에 턴은 이미 저장·commit돼 있다. 큐가 꽉 차 chatMemoryExecutor가
+     * RejectedExecutionException을 던지더라도(코어 2/최대 4/큐 50 — FastAPI가 느려지면
+     * 스레드가 오래 묶여 채워질 수 있다) 사용자에게는 정상 응답을 돌려준다 — 이미 성공한
+     * 턴을 요약 갱신 실패로 되돌릴 이유가 없다. 놓친 요약 갱신은 다음 트리거에서
+     * findAfterMessageId가 안 접힌 턴을 그대로 다시 잡아내 자연히 따라잡는다.
+     */
+    private void triggerSummaryUpdate(Long sessionId) {
+        try {
+            chatMemoryAsyncService.updateSummaryIfNeeded(sessionId);
+        } catch (RuntimeException e) {
+            log.warn("요약 갱신 트리거 실패(턴은 이미 저장됨, 다음 트리거에서 재시도됨): sessionId={}", sessionId, e);
+        }
     }
 
     /** sessionId가 없거나, 있어도 내 것이 아니면 null — 새로 만들지는 않는다(읽기 전용 조회). */

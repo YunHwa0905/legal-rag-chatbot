@@ -172,4 +172,33 @@ class ChatServiceTest {
         verify(chatSessionDao).insert(any());
         verify(chatMemoryAsyncService).updateSummaryIfNeeded(any());
     }
+
+    @Test
+    void chat_요약갱신_트리거가_실패해도_이미_저장된_턴에_대한_응답은_정상_반환한다() {
+        // I1: chatMemoryExecutor 큐가 꽉 차면 updateSummaryIfNeeded(...) 호출 자체가
+        // 요청 스레드에서 RejectedExecutionException을 던질 수 있다. 이 시점엔 턴이
+        // 이미 persistTurn/touch로 저장된 뒤라, 이 예외가 그대로 사용자에게 500으로
+        // 나가면 "성공한 턴이 실패로 보이는" 상황이 된다 — 삼켜지고 정상 응답이 나가야 한다.
+        ChatResponse fastApiResponse = new ChatResponse();
+        fastApiResponse.setAnswer("답변");
+        when(webClient.post()
+                .uri(anyString())
+                .bodyValue(any())
+                .retrieve()
+                .bodyToMono(ChatResponse.class)
+                .block())
+                .thenReturn(fastApiResponse);
+        doThrow(new java.util.concurrent.RejectedExecutionException("큐 꽉 참"))
+                .when(chatMemoryAsyncService).updateSummaryIfNeeded(any());
+
+        ChatRequest req = new ChatRequest();
+        req.setQuestion("가압류가 뭔가요?");
+        req.setSessionId(null);
+
+        ChatResponse result = chatService.chat(req, 7L, 30);
+
+        assertEquals("답변", result.getAnswer());
+        verify(chatMessagePersistenceService).persistTurn(any(), eq("가압류가 뭔가요?"), eq(fastApiResponse));
+        verify(chatSessionDao).touch(any());
+    }
 }

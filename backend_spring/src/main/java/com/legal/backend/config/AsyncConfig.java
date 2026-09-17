@@ -45,7 +45,9 @@ public class AsyncConfig implements AsyncConfigurer {
     }
 
     private void handleUncaught(Throwable ex, Method method, Object... params) {
-        // Phase 1에서 ChatAsyncJobDao로 chat_async_job 테이블에도 기록한다.
+        // 현재는 로그만 남긴다 — chat_async_job 테이블(스키마엔 있음)에 기록하는 건
+        // 아직 구현되지 않았다. Phase 1은 이 실행기에 처음으로 실제 트래픽(요약 갱신)을
+        // 태우는 릴리스라 관측 가능성이 로그 한 줄뿐이라는 점을 명확히 남겨둔다.
         log.error("비동기 작업 실패: {} — {}", method.getName(), ex.getMessage(), ex);
     }
 }

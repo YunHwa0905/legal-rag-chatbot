@@ -2,8 +2,10 @@
 FastAPI 라우터
 
 엔드포인트:
-- POST /chat   → 법률 QA 챗봇 답변
-- GET  /health → 서버 상태 확인
+- POST /chat                    → 법률 QA 챗봇 답변
+- GET  /health                  → 서버 상태 확인
+- GET  /documents/{doc_id}      → 참조 문서 원문 조회
+- POST /summary/update          → 대화 롤링 요약 갱신(Spring이 비동기로 호출)
 """
 
 import sys

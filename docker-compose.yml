@@ -105,6 +105,7 @@ services:
 
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-legal-gemma}
+      OLLAMA_REWRITE_MODEL: ${OLLAMA_REWRITE_MODEL:-gemma3:1b}
 
       RAG_TOP_K: ${RAG_TOP_K:-6}
       RAG_MIN_SCORE: ${RAG_MIN_SCORE:-0.5}

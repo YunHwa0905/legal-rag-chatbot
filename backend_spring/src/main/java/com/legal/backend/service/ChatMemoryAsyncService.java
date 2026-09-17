@@ -9,6 +9,7 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -26,6 +27,13 @@ public class ChatMemoryAsyncService {
 
     // 아직 요약에 안 접힌 턴이 2턴(4메시지)을 넘으면(3턴째 질문부터) 요약을 갱신한다.
     private static final int SUMMARY_TRIGGER_TURNS = 2;
+
+    // chatMemoryExecutor는 core=2/max=4/queue=50 — FastAPI 호출에 타임아웃이 없으면
+    // 응답 없는 FastAPI/Ollama 하나가 이 풀의 스레드를 무기한 붙잡아 큐가 꽉 차고,
+    // 다음 updateSummaryIfNeeded(...) 호출이 호출자(ChatService, 요청 스레드)에서
+    // RejectedExecutionException으로 즉시 터진다 — 이미 턴이 저장된 뒤라 사용자에게는
+    // "성공했는데 실패로 보이는" 응답이 나간다. 이 타임아웃이 그 시나리오를 막는다.
+    private static final Duration FASTAPI_CALL_TIMEOUT = Duration.ofSeconds(60);
 
     @Autowired
     private WebClient webClient;
@@ -57,7 +65,7 @@ public class ChatMemoryAsyncService {
                 .bodyValue(body)
                 .retrieve()
                 .bodyToMono(Map.class)
-                .block();
+                .block(FASTAPI_CALL_TIMEOUT);
 
         if (result == null) {
             throw new IllegalStateException("요약 갱신: FastAPI 응답이 비어 있습니다. sessionId=" + sessionId);

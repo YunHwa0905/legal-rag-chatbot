@@ -16,9 +16,15 @@ from core.config import settings
 
 # ===========================
 # Ollama 설정
+#
+# core.config.settings(pydantic-settings)를 거쳐야 .env 파일이 실제로 반영된다.
+# 예전엔 여기서 os.getenv()를 직접 썼는데, 그러면 .env 파일 값은 무시되고
+# 진짜 프로세스 환경변수(예: docker-compose의 environment: 블록)만 읽혔다 —
+# 운영 배포는 그렇게 값을 주입해서 문제가 없었지만, .env 파일로 설정하는
+# 모든 환경(이 워크트리 포함)에서는 조용히 기본값으로 떨어지는 버그였다.
 # ===========================
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "legal-gemma")
+OLLAMA_BASE_URL = settings.OLLAMA_BASE_URL
+OLLAMA_MODEL    = settings.OLLAMA_MODEL
 
 
 # ===========================

@@ -11,11 +11,13 @@
     </select>
 
     <insert id="upsertIfNewer">
+        <![CDATA[
         INSERT INTO chat_session_summary (session_id, summary, through_message_id)
         VALUES (#{sessionId}, #{summary}, #{throughMessageId})
         ON DUPLICATE KEY UPDATE
             summary = IF(through_message_id < #{throughMessageId}, #{summary}, summary),
             through_message_id = IF(through_message_id < #{throughMessageId}, #{throughMessageId}, through_message_id)
+        ]]>
     </insert>
 
 </mapper>
