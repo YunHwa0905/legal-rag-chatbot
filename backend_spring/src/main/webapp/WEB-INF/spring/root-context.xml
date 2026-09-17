@@ -60,4 +60,25 @@
         <constructor-arg value="${fastapi.url}"/>
     </bean>
 
+    <!--
+        Redis는 순수 읽기 캐시(cache-aside)다 — 세션/인증 저장소가 아니다.
+        연결은 지연(lazy)이어야 한다: 이 빈 생성 시점에 Redis가 안 떠 있어도
+        애플리케이션 부팅이 실패하면 안 된다(ChatCacheService가 모든 호출을
+        try/catch로 감싸 장애 시 MySQL로 폴백하는 게 전제다).
+    -->
+    <bean id="redisStandaloneConfiguration"
+          class="org.springframework.data.redis.connection.RedisStandaloneConfiguration">
+        <constructor-arg index="0" value="${redis.host}"/>
+        <constructor-arg index="1" value="${redis.port}" type="int"/>
+    </bean>
+
+    <bean id="redisConnectionFactory"
+          class="org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory">
+        <constructor-arg ref="redisStandaloneConfiguration"/>
+    </bean>
+
+    <bean id="stringRedisTemplate" class="org.springframework.data.redis.core.StringRedisTemplate">
+        <constructor-arg ref="redisConnectionFactory"/>
+    </bean>
+
 </beans>

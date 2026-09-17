@@ -68,6 +68,8 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       JWT_EXPIRATION: ${JWT_EXPIRATION:-86400000}
       FASTAPI_URL: ${FASTAPI_URL:-http://ai:8000}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
       CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-}
     expose:
       - "8080"
@@ -75,6 +77,8 @@ services:
       mysql:
         condition: service_healthy
       ai:
+        condition: service_started
+      redis:
         condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
@@ -200,6 +204,18 @@ services:
       timeout: 10s
       retries: 15
       start_period: 90s
+
+  # ---------------------------------------------------------
+  # 읽기 캐시 (Phase 1.5) — 세션 목록·대화 컨텍스트만 캐싱.
+  # 데이터 유실을 걱정할 필요 없는 순수 캐시라 영속 볼륨을 안 둔다
+  # (컨테이너 재시작 = 캐시 전체 미스, MySQL이 다시 채움 — 무해).
+  # ---------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: lexai-redis
+    restart: unless-stopped
+    expose:
+      - "6379"
 
   # ---------------------------------------------------------
   # RDB — MySQL 8 (사용자 정보)

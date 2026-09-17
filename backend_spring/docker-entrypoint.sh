@@ -54,6 +54,8 @@ db.url=${DB_URL}
 db.username=${DB_USERNAME}
 db.password=${DB_PASSWORD}
 fastapi.url=${FASTAPI_URL:-http://ai:8000}
+redis.host=${REDIS_HOST:-redis}
+redis.port=${REDIS_PORT:-6379}
 jwt.secret=${JWT_SECRET}
 jwt.expiration=${JWT_EXPIRATION:-86400000}
 EOF
@@ -63,6 +65,7 @@ chmod 600 "$PROPS"
 echo "[INFO] db.properties 생성 완료"
 echo "[INFO]   db.url      = ${DB_URL}"
 echo "[INFO]   fastapi.url = ${FASTAPI_URL:-http://ai:8000}"
+echo "[INFO]   redis       = ${REDIS_HOST:-redis}:${REDIS_PORT:-6379} (선택적 — 없어도 기능은 동작)"
 echo "[INFO]   CORS origin = ${CORS_ALLOWED_ORIGIN:-(없음 — 동일 오리진)}"
 
 exec "$@"
