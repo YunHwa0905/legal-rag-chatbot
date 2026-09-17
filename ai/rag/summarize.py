@@ -9,7 +9,6 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.model import generate
-from core.config import settings
 from core.context_caps import SUMMARY_MAX_LEN, HISTORY_TURN_MAX_LEN, sanitize, format_turns
 
 # 한 번에 접을 수 있는 턴 수 상한(메시지 기준 = *2). 정상 경로에서는
@@ -46,10 +45,13 @@ def update_summary(prev_summary: str, turns_to_fold: list) -> str:
     summary = generate(
         system_prompt="",
         user_message=prompt,
-        # 요약은 법률 지식이 필요 없는 NLU 작업이다 — legal-gemma(무거운 답변 모델)
-        # 대신 재작성과 같은 경량 모델로 라우팅해 foreground 답변 생성과의
-        # GPU/Ollama 자원 경합을 줄인다.
-        model=settings.OLLAMA_REWRITE_MODEL,
+        # OLLAMA_REWRITE_MODEL(gemma3:1b)로 라우팅했다가 되돌렸다 — 실 E2E 라이브
+        # 테스트에서 실제 3턴 대화(캡 적용된 6메시지 입력, 위 _cap_turns_to_fold와
+        # 정확히 동일한 조건)를 넣어보니 1b는 "요약문만 출력하라"를 무시하고
+        # "사용자: .../챗봇: ..." 원문 전사를 그대로(또는 화자 라벨만 살짝 바꿔)
+        # 돌려줬다 — 실제로 DB에 영속화되는 걸 확인함. 같은 입력을 기본 모델
+        # (legal-gemma)에 주면 제대로 된 한 문단 요약이 나온다. 요약은 매 턴마다
+        # 재주입되는 영속 아티팩트라 품질이 속도보다 중요해 기본 모델로 되돌림.
         max_tokens=200,
         temperature=0.1,
     ).strip()
