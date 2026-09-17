@@ -1,33 +1,54 @@
 package com.legal.backend.service;
 
+import com.legal.backend.dao.ChatMessageDao;
 import com.legal.backend.dao.ChatSessionDao;
+import com.legal.backend.dao.ChatSessionSummaryDao;
 import com.legal.backend.dto.ChatRequest;
 import com.legal.backend.dto.ChatResponse;
+import com.legal.backend.entity.ChatMessage;
 import com.legal.backend.entity.ChatSession;
+import com.legal.backend.entity.ChatSessionSummary;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @Service
 public class ChatService {
 
     private static final int TITLE_MAX_LEN = 20;
+    // 최근 2턴(user+assistant 페어) = 메시지 4개. 스펙 §3의 HISTORY_WINDOW_TURNS=2.
+    private static final int HISTORY_WINDOW_MESSAGES = 4;
 
     @Autowired
     private WebClient webClient;
     @Autowired
     private ChatSessionDao chatSessionDao;
     @Autowired
+    private ChatMessageDao chatMessageDao;
+    @Autowired
+    private ChatSessionSummaryDao chatSessionSummaryDao;
+    @Autowired
     private ChatMessagePersistenceService chatMessagePersistenceService;
+    @Autowired
+    private ChatMemoryAsyncService chatMemoryAsyncService;
 
     public ChatResponse chat(ChatRequest req, Long userId, int age) {
+        // FastAPI 호출 전: 이미 존재하는 내 세션이면 이력·요약을 실어 보낸다.
+        // (세션을 새로 만들지는 않는다 — 그건 FastAPI 성공 후 resolveSession의 몫.
+        //  Finding 1: 응답 실패 시 세션이 생기면 안 된다는 불변조건을 유지하기 위함)
+        ChatSession existing = findOwnedSession(req.getSessionId(), userId);
+
         Map<String, Object> body = new HashMap<>();
         body.put("question", req.getQuestion());
         body.put("age", age);
         body.put("law_category", req.getLawCategory());
+        body.put("history", existing != null ? historyPayload(existing.getId()) : List.of());
+        body.put("summary", existing != null ? summaryText(existing.getId()) : null);
 
         ChatResponse response = webClient.post()
                 .uri("/api/v1/chat")
@@ -43,10 +64,37 @@ public class ChatService {
         ChatSession session = resolveSession(req.getSessionId(), userId, req.getQuestion());
         chatMessagePersistenceService.persistTurn(session.getId(), req.getQuestion(), response);
         chatSessionDao.touch(session.getId());
+        chatMemoryAsyncService.updateSummaryIfNeeded(session.getId());
 
         response.setSessionId(session.getId());
         response.setSessionTitle(session.getTitle());
         return response;
+    }
+
+    /** sessionId가 없거나, 있어도 내 것이 아니면 null — 새로 만들지는 않는다(읽기 전용 조회). */
+    private ChatSession findOwnedSession(Long sessionId, Long userId) {
+        if (sessionId == null) {
+            return null;
+        }
+        ChatSession existing = chatSessionDao.findById(sessionId);
+        return (existing != null && existing.getUserId().equals(userId)) ? existing : null;
+    }
+
+    private List<Map<String, String>> historyPayload(Long sessionId) {
+        List<ChatMessage> recent = chatMessageDao.findRecentMessages(sessionId, HISTORY_WINDOW_MESSAGES);
+        List<Map<String, String>> payload = new ArrayList<>();
+        for (ChatMessage m : recent) {
+            Map<String, String> turn = new HashMap<>();
+            turn.put("role", m.getRole());
+            turn.put("content", m.getContent());
+            payload.add(turn);
+        }
+        return payload;
+    }
+
+    private String summaryText(Long sessionId) {
+        ChatSessionSummary summary = chatSessionSummaryDao.find(sessionId);
+        return summary != null ? summary.getSummary() : null;
     }
 
     /**
