@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.legal.backend.dao.ChatSessionSummaryDao">
+
+    <select id="find" resultType="ChatSessionSummary">
+        SELECT session_id AS sessionId, summary,
+               through_message_id AS throughMessageId, updated_at AS updatedAt
+        FROM chat_session_summary
+        WHERE session_id = #{sessionId}
+    </select>
+
+    <insert id="upsertIfNewer">
+        <![CDATA[
+        INSERT INTO chat_session_summary (session_id, summary, through_message_id)
+        VALUES (#{sessionId}, #{summary}, #{throughMessageId})
+        ON DUPLICATE KEY UPDATE
+            summary = IF(through_message_id < #{throughMessageId}, #{summary}, summary),
+            through_message_id = IF(through_message_id < #{throughMessageId}, #{throughMessageId}, through_message_id)
+        ]]>
+    </insert>
+
+</mapper>

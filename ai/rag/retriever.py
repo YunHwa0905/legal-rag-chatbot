@@ -86,6 +86,43 @@ def _title_match_score(query: str, title: str) -> float:
 
 
 # ===========================
+# 채널 정규화·합산 헬퍼 — _hybrid_search와 search_multi가 공유
+# ===========================
+def _accumulate_channel(hits: list, scores: dict, docs: dict) -> None:
+    """한 채널(kNN 또는 BM25)의 검색 결과를 자체 최고점 기준으로 정규화해서
+    scores/docs 딕셔너리에 제자리(in-place)로 합산한다."""
+    max_score = max((h["_score"] for h in hits), default=1)
+    for hit in hits:
+        doc_id = hit["_source"]["doc_id"]
+        normalized = hit["_score"] / max_score if max_score > 0 else 0
+        scores[doc_id] = scores.get(doc_id, 0) + normalized
+        docs[doc_id] = hit["_source"]
+
+
+def _apply_title_bonus(query_text: str, scores: dict, docs: dict) -> None:
+    """제목-질문 매칭 보너스를 scores에 제자리로 더한다."""
+    for doc_id in scores:
+        title = _extract_title(docs[doc_id].get("text", ""))
+        scores[doc_id] += _title_match_score(query_text, title) * TITLE_MATCH_WEIGHT
+
+
+def _finalize(scores: dict, docs: dict, top_k: int, min_score: float) -> list:
+    sorted_docs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    results = []
+    for doc_id, score in sorted_docs[:top_k]:
+        if score >= min_score:
+            results.append({
+                "doc_id": doc_id,
+                "score": round(score, 4),
+                "text": docs[doc_id]["text"],
+                "law_category": docs[doc_id].get("law_category", ""),
+                "doc_type": docs[doc_id].get("doc_type", ""),
+                "source": docs[doc_id].get("source", ""),
+            })
+    return results
+
+
+# ===========================
 # 임베딩 디바이스 결정
 #
 # 배포 이미지는 디스크 절약을 위해 CPU 전용 torch 를 설치합니다(LLM 추론은
@@ -216,50 +253,54 @@ class LegalRetriever:
 
         scores = {}
         docs = {}
+        _accumulate_channel(knn_results, scores, docs)
+        _accumulate_channel(bm25_results, scores, docs)
+        _apply_title_bonus(query_text, scores, docs)
 
-        # kNN 점수 정규화 후 합산
-        knn_max = max((h["_score"] for h in knn_results), default=1)
-        for hit in knn_results:
-            doc_id = hit["_source"]["doc_id"]
-            normalized = hit["_score"] / knn_max if knn_max > 0 else 0
-            scores[doc_id] = scores.get(doc_id, 0) + normalized
-            docs[doc_id] = hit["_source"]
+        return _finalize(scores, docs, self.top_k, self.min_score)
 
-        # BM25 점수 정규화 후 합산 (가중치 0.5 → 1.0)
-        #
-        # 가중치가 0.5였을 때는 kNN 1등(정규화 1.0)이 BM25 1등(정규화 1.0×0.5=0.5)을
-        # 구조적으로 항상 이겼다. "가압류" 같은 쿼리에서 kNN 임베딩이 완전히 엉뚱한
-        # 문서(일반 "압류" 행정/세무 문서)를 상위에 올리고 BM25는 정답(민사법 "가압류"
-        # 문서)을 정확히 찾아내도, kNN 가중치가 두 배라 BM25의 정답이 최종 후보에서
-        # 밀려났다. 1.0으로 동률을 만들어 두 채널이 대등하게 경쟁하도록 한다.
-        bm25_max = max((h["_score"] for h in bm25_results), default=1)
-        for hit in bm25_results:
-            doc_id = hit["_source"]["doc_id"]
-            normalized = hit["_score"] / bm25_max if bm25_max > 0 else 0
-            scores[doc_id] = scores.get(doc_id, 0) + normalized
-            docs[doc_id] = hit["_source"]
+    # ===========================
+    # 다중 질문 검색 (원본 + 재작성 질문을 함께 검색해 융합)
+    #
+    # 재작성이 틀려도 원본 채널이 정답 후보를 살려둔다 — kNN/BM25 두 채널을
+    # 합산해 온 것과 같은 원리를 재작성/원본 두 질의에도 적용.
+    # queries가 원소 1개면 _hybrid_search와 완전히 동일하게 동작한다.
+    #
+    # 세 단계로 나눠서 마지막에 한 번에 정규화한다:
+    # (1) 모든 쿼리의 채널 점수를 먼저 전부 누적.
+    # (2) 타이틀 보너스를 완성된 scores 딕셔너리에 쿼리마다 한 번씩만 적용 —
+    #     예전엔 루프 안에서 적용해서, 먼저(원본 쿼리로) 들어온 문서는 이후
+    #     쿼리 순회 때마다 보너스를 또 받고 재작성 쿼리에서만 새로 발견된
+    #     문서는 한 번만 받는 비대칭이 있었다. 재작성 채널이 찾으려는 바로
+    #     그 문서들이 구조적으로 불리해지는 문제.
+    # (3) 채널 점수 + 보너스를 합친 최종 점수를 쿼리 개수로 나누기 — 안 그러면
+    #     쿼리 2개일 때 점수가 대략 2배가 돼 RAG_MIN_SCORE가 재작성된 턴에서만
+    #     사실상 절반으로 느슨해진다. 보너스를 나누기 *전에* 더해야 한다 —
+    #     나눈 뒤에 더하면 보너스만 쿼리 개수만큼 배로 부풀어 같은 문제가
+    #     보너스 쪽에 그대로 남는다.
+    # queries가 1개면 나누기 자체를 건너뛰어(스킵, 1로 나누기가 아니라) 기존
+    # 결과와 완전히 동일하다.
+    # ===========================
+    def search_multi(self, queries: list, law_category: str = None) -> list:
+        pool_size = max(self.top_k * 5, 30)
+        scores = {}
+        docs = {}
 
-        # 제목-질문 매칭 보너스: 제목이 질문과 실제로 겹치는 문서를 우선시
-        for doc_id in scores:
-            title = _extract_title(docs[doc_id].get("text", ""))
-            scores[doc_id] += _title_match_score(query_text, title) * TITLE_MATCH_WEIGHT
+        for query_text in queries:
+            query_vector = self._embed_query(query_text)
+            knn_results = self._knn_search(query_vector, law_category, size=pool_size)
+            bm25_results = self._bm25_search(query_text, law_category, size=pool_size)
+            _accumulate_channel(knn_results, scores, docs)
+            _accumulate_channel(bm25_results, scores, docs)
 
-        # 점수 기준 정렬
-        sorted_docs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        for query_text in queries:
+            _apply_title_bonus(query_text, scores, docs)
 
-        results = []
-        for doc_id, score in sorted_docs[:self.top_k]:
-            if score >= self.min_score:
-                results.append({
-                    "doc_id": doc_id,
-                    "score": round(score, 4),
-                    "text": docs[doc_id]["text"],
-                    "law_category": docs[doc_id].get("law_category", ""),
-                    "doc_type": docs[doc_id].get("doc_type", ""),
-                    "source": docs[doc_id].get("source", ""),
-                })
+        if len(queries) > 1:
+            for doc_id in scores:
+                scores[doc_id] /= len(queries)
 
-        return results
+        return _finalize(scores, docs, self.top_k, self.min_score)
 
     # ===========================
     # 메인 검색 함수
@@ -310,11 +351,9 @@ class LegalRetriever:
         return "\n".join(cleaned).strip()
 
     # ===========================
-    # 컨텍스트 텍스트 생성
+    # 검색 결과 → 컨텍스트 텍스트 변환 (search()/search_multi() 결과 둘 다 받음)
     # ===========================
-    def get_context(self, query: str, law_category: str = None) -> str:
-        results = self.search(query, law_category)
-
+    def format_context(self, results: list) -> str:
         if not results:
             return "관련 법률 문서를 찾을 수 없습니다."
 
@@ -329,6 +368,13 @@ class LegalRetriever:
             )
 
         return "\n\n".join(context_parts)
+
+    # ===========================
+    # 컨텍스트 텍스트 생성 (단일 질문 편의 메서드 — 내부적으로 search() + format_context())
+    # ===========================
+    def get_context(self, query: str, law_category: str = None) -> str:
+        results = self.search(query, law_category)
+        return self.format_context(results)
 
 
 # ===========================

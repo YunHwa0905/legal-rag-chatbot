@@ -33,5 +33,33 @@
   { "id": "ip-adult",    "expected_category": "지식재산권", "age": 28, "question": "상표권 침해를 판단하는 기준은 무엇인가요?" },
   { "id": "ip-adult-2",  "expected_category": "지식재산권", "age": 28, "question": "저작권 등록을 안 해도 저작권으로 보호받을 수 있나요?" },
   { "id": "ip-senior",   "expected_category": "지식재산권", "age": 50, "question": "특허권 침해소송에서 손해배상액 산정 기준은 어떻게 되나요?" },
-  { "id": "ip-senior-2", "expected_category": "지식재산권", "age": 50, "question": "영업비밀 침해가 성립하기 위한 요건은 무엇인가요?" }
+  { "id": "ip-senior-2", "expected_category": "지식재산권", "age": 50, "question": "영업비밀 침해가 성립하기 위한 요건은 무엇인가요?" },
+
+  { "id": "mt-civ-1", "expected_category": "민사", "age": 28,
+    "history": [
+      { "role": "user", "content": "전세 계약 갱신을 거부당했어요" },
+      { "role": "assistant", "content": "임대인은 정당한 사유 없이 갱신을 거부할 수 없습니다. 계약갱신요구권 행사 여부와 임대인의 거부 사유를 확인해야 합니다." }
+    ],
+    "question": "그럼 계약금은 어떻게 되나요?" },
+
+  { "id": "mt-crim-1", "expected_category": "형사", "age": 15,
+    "history": [
+      { "role": "user", "content": "학교 폭력을 신고하면 가해자는 어떤 처벌을 받나요?" },
+      { "role": "assistant", "content": "학교폭력예방법에 따라 교육적 조치를 받고, 피해 정도에 따라 형사처벌도 가능합니다." }
+    ],
+    "question": "그거 신고는 어디에 하면 돼요?" },
+
+  { "id": "mt-ip-1", "expected_category": "지식재산권", "age": 28,
+    "history": [
+      { "role": "user", "content": "상표권 침해를 판단하는 기준은 무엇인가요?" },
+      { "role": "assistant", "content": "상표의 유사성과 지정상품의 동일·유사성을 종합적으로 고려하여 판단합니다." }
+    ],
+    "question": "위에서 말한 유사성은 어떻게 판단하나요?" },
+
+  { "id": "mt-admin-1", "expected_category": "행정", "age": 50,
+    "history": [
+      { "role": "user", "content": "영업정지 처분에 대한 집행정지 신청 요건은 무엇인가요?" },
+      { "role": "assistant", "content": "회복하기 어려운 손해 예방의 긴급한 필요성 등이 인정되어야 합니다." }
+    ],
+    "question": "그럼 신청은 언제까지 해야 하나요?" }
 ]

@@ -37,6 +37,7 @@ public class ChatMessagePersistenceService {
         botMsg.setSessionId(sessionId);
         botMsg.setRole("assistant");
         botMsg.setContent(response.getAnswer());
+        botMsg.setStandaloneQuery(response.getStandaloneQuery());
         botMsg.setSourcesJson(toJsonOrNull(response.getSources()));
         chatMessageDao.insert(botMsg);
     }

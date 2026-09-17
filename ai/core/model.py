@@ -16,9 +16,15 @@ from core.config import settings
 
 # ===========================
 # Ollama 설정
+#
+# core.config.settings(pydantic-settings)를 거쳐야 .env 파일이 실제로 반영된다.
+# 예전엔 여기서 os.getenv()를 직접 썼는데, 그러면 .env 파일 값은 무시되고
+# 진짜 프로세스 환경변수(예: docker-compose의 environment: 블록)만 읽혔다 —
+# 운영 배포는 그렇게 값을 주입해서 문제가 없었지만, .env 파일로 설정하는
+# 모든 환경(이 워크트리 포함)에서는 조용히 기본값으로 떨어지는 버그였다.
 # ===========================
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "legal-gemma")
+OLLAMA_BASE_URL = settings.OLLAMA_BASE_URL
+OLLAMA_MODEL    = settings.OLLAMA_MODEL
 
 
 # ===========================
@@ -38,11 +44,16 @@ def check_ollama() -> bool:
 def generate(
     system_prompt: str,
     user_message: str,
+    model: str = None,
+    max_tokens: int = None,
+    temperature: float = None,
 ) -> str:
+    target_model = model or OLLAMA_MODEL
+
     if not check_ollama():
         raise RuntimeError(
             f"Ollama 서버에 연결할 수 없습니다: {OLLAMA_BASE_URL}\n"
-            f"'ollama run {OLLAMA_MODEL}' 명령어로 모델을 먼저 실행해주세요."
+            f"'ollama run {target_model}' 명령어로 모델을 먼저 실행해주세요."
         )
 
     # Gemma는 system role 미지원 → user 메시지에 합쳐서 전달
@@ -51,15 +62,15 @@ def generate(
     response = requests.post(
         f"{OLLAMA_BASE_URL}/api/chat",
         json={
-            "model": OLLAMA_MODEL,
+            "model": target_model,
             "messages": [
                 {"role": "user", "content": combined},
             ],
             "stream": False,
             "options": {
-                "temperature":    settings.TEMPERATURE,
+                "temperature":    temperature if temperature is not None else settings.TEMPERATURE,
                 "top_p":          settings.TOP_P,
-                "num_predict":    settings.MAX_NEW_TOKENS,
+                "num_predict":    max_tokens if max_tokens is not None else settings.MAX_NEW_TOKENS,
                 "repeat_penalty": 1.1,
                 "num_ctx":        4096,
             },

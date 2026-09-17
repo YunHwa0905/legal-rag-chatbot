@@ -19,6 +19,7 @@ set -euo pipefail
 
 CONTAINER="lexai-ollama"
 TARGET_MODEL="${OLLAMA_MODEL:-legal-gemma}"
+REWRITE_MODEL="${OLLAMA_REWRITE_MODEL:-gemma3:1b}"
 
 # 원본 Modelfile 의 파라미터를 그대로 옮깁니다.
 TEMPERATURE="0.1"
@@ -83,7 +84,18 @@ EOF
 ollama create ${TARGET_MODEL} -f /tmp/Modelfile"
 
 echo "==========================================================="
-echo " 5. 결과"
+echo " 5. 후속 질문 재작성용 경량 모델(${REWRITE_MODEL}) 다운로드"
+echo "==========================================================="
+echo "   법률 지식이 필요 없는 NLU 전용 모델이라 별도 Modelfile 없이 그대로 쓴다."
+if docker exec "$CONTAINER" ollama pull "$REWRITE_MODEL"; then
+    echo "[OK] ${REWRITE_MODEL} 다운로드 완료"
+else
+    echo "[FATAL] ${REWRITE_MODEL} 을 받지 못했습니다 — 후속 질문 재작성이 매번 실패로 저하됩니다(단일턴으로는 계속 동작)." >&2
+    exit 1
+fi
+
+echo "==========================================================="
+echo " 6. 결과"
 echo "==========================================================="
 docker exec "$CONTAINER" ollama list
 

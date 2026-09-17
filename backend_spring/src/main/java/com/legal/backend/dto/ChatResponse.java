@@ -24,6 +24,12 @@ public class ChatResponse {
 
     private int age;
 
+    @JsonProperty("standalone_query")
+    private String standaloneQuery;
+
+    @JsonProperty("rewrite_applied")
+    private boolean rewriteApplied;
+
     @Getter
     @Setter
     public static class SourceDocument {

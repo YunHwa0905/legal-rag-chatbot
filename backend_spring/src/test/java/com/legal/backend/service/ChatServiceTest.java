@@ -1,20 +1,28 @@
 package com.legal.backend.service;
 
+import com.legal.backend.dao.ChatMessageDao;
 import com.legal.backend.dao.ChatSessionDao;
+import com.legal.backend.dao.ChatSessionSummaryDao;
 import com.legal.backend.dto.ChatRequest;
 import com.legal.backend.dto.ChatResponse;
+import com.legal.backend.entity.ChatMessage;
 import com.legal.backend.entity.ChatSession;
+import com.legal.backend.entity.ChatSessionSummary;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Answers;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Answers;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import java.time.Duration;
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -23,7 +31,13 @@ class ChatServiceTest {
     @Mock
     private ChatSessionDao chatSessionDao;
     @Mock
+    private ChatMessageDao chatMessageDao;
+    @Mock
+    private ChatSessionSummaryDao chatSessionSummaryDao;
+    @Mock
     private ChatMessagePersistenceService chatMessagePersistenceService;
+    @Mock
+    private ChatMemoryAsyncService chatMemoryAsyncService;
     @Mock(answer = Answers.RETURNS_DEEP_STUBS)
     private WebClient webClient;
 
@@ -84,7 +98,7 @@ class ChatServiceTest {
                 .bodyValue(any())
                 .retrieve()
                 .bodyToMono(ChatResponse.class)
-                .block())
+                .block(any(Duration.class)))
                 .thenReturn(null);
 
         ChatRequest req = new ChatRequest();
@@ -93,9 +107,99 @@ class ChatServiceTest {
 
         assertThrows(IllegalStateException.class, () -> chatService.chat(req, 7L, 20));
 
-        // 응답이 비어있으면 세션 조회/생성 자체가 일어나지 않아야 한다 (Finding 1: 순서 재배치)
-        verify(chatSessionDao, never()).findById(any());
+        // 응답이 비어있으면 세션 생성·턴 저장이 일어나지 않아야 한다 (Finding 1: 순서 재배치).
+        // findById는 이력 조회를 위해 호출될 수 있다(findOwnedSession) — 그건 읽기 전용이라 무해하다.
         verify(chatSessionDao, never()).insert(any());
         verify(chatMessagePersistenceService, never()).persistTurn(any(), any(), any());
+        verify(chatMemoryAsyncService, never()).updateSummaryIfNeeded(any());
+    }
+
+    @Test
+    void chat_기존_세션이면_이력과_요약을_로드하고_응답_후_요약갱신을_트리거한다() {
+        ChatSession mine = new ChatSession(5L, 7L, "내 대화", null, null, null);
+        when(chatSessionDao.findById(5L)).thenReturn(mine);
+
+        ChatMessage userMsg = new ChatMessage(1L, 5L, "user", "이전 질문", null, null, null);
+        ChatMessage botMsg = new ChatMessage(2L, 5L, "assistant", "이전 답변", null, null, null);
+        when(chatMessageDao.findRecentMessages(5L, 4)).thenReturn(List.of(userMsg, botMsg));
+
+        ChatSessionSummary summary = new ChatSessionSummary(5L, "요약본", 2L, null);
+        when(chatSessionSummaryDao.find(5L)).thenReturn(summary);
+
+        ChatResponse fastApiResponse = new ChatResponse();
+        fastApiResponse.setAnswer("답변");
+        when(webClient.post()
+                .uri(anyString())
+                .bodyValue(any())
+                .retrieve()
+                .bodyToMono(ChatResponse.class)
+                .block(any(Duration.class)))
+                .thenReturn(fastApiResponse);
+
+        ChatRequest req = new ChatRequest();
+        req.setQuestion("그럼 어떻게 되나요?");
+        req.setSessionId(5L);
+
+        ChatResponse result = chatService.chat(req, 7L, 30);
+
+        assertEquals(5L, result.getSessionId());
+        verify(chatMessageDao).findRecentMessages(5L, 4);
+        verify(chatSessionSummaryDao).find(5L);
+        verify(chatMessagePersistenceService).persistTurn(5L, "그럼 어떻게 되나요?", fastApiResponse);
+        verify(chatSessionDao).touch(5L);
+        verify(chatMemoryAsyncService).updateSummaryIfNeeded(5L);
+    }
+
+    @Test
+    void chat_새_세션이면_이력_조회_없이_빈_이력으로_진행한다() {
+        ChatResponse fastApiResponse = new ChatResponse();
+        fastApiResponse.setAnswer("답변");
+        when(webClient.post()
+                .uri(anyString())
+                .bodyValue(any())
+                .retrieve()
+                .bodyToMono(ChatResponse.class)
+                .block(any(Duration.class)))
+                .thenReturn(fastApiResponse);
+
+        ChatRequest req = new ChatRequest();
+        req.setQuestion("가압류가 뭔가요?");
+        req.setSessionId(null);
+
+        chatService.chat(req, 7L, 30);
+
+        verify(chatMessageDao, never()).findRecentMessages(any(), anyInt());
+        verify(chatSessionSummaryDao, never()).find(any());
+        verify(chatSessionDao).insert(any());
+        verify(chatMemoryAsyncService).updateSummaryIfNeeded(any());
+    }
+
+    @Test
+    void chat_요약갱신_트리거가_실패해도_이미_저장된_턴에_대한_응답은_정상_반환한다() {
+        // I1: chatMemoryExecutor 큐가 꽉 차면 updateSummaryIfNeeded(...) 호출 자체가
+        // 요청 스레드에서 RejectedExecutionException을 던질 수 있다. 이 시점엔 턴이
+        // 이미 persistTurn/touch로 저장된 뒤라, 이 예외가 그대로 사용자에게 500으로
+        // 나가면 "성공한 턴이 실패로 보이는" 상황이 된다 — 삼켜지고 정상 응답이 나가야 한다.
+        ChatResponse fastApiResponse = new ChatResponse();
+        fastApiResponse.setAnswer("답변");
+        when(webClient.post()
+                .uri(anyString())
+                .bodyValue(any())
+                .retrieve()
+                .bodyToMono(ChatResponse.class)
+                .block(any(Duration.class)))
+                .thenReturn(fastApiResponse);
+        doThrow(new java.util.concurrent.RejectedExecutionException("큐 꽉 참"))
+                .when(chatMemoryAsyncService).updateSummaryIfNeeded(any());
+
+        ChatRequest req = new ChatRequest();
+        req.setQuestion("가압류가 뭔가요?");
+        req.setSessionId(null);
+
+        ChatResponse result = chatService.chat(req, 7L, 30);
+
+        assertEquals("답변", result.getAnswer());
+        verify(chatMessagePersistenceService).persistTurn(any(), eq("가압류가 뭔가요?"), eq(fastApiResponse));
+        verify(chatSessionDao).touch(any());
     }
 }

@@ -2,8 +2,10 @@
 FastAPI 라우터
 
 엔드포인트:
-- POST /chat   → 법률 QA 챗봇 답변
-- GET  /health → 서버 상태 확인
+- POST /chat                    → 법률 QA 챗봇 답변
+- GET  /health                  → 서버 상태 확인
+- GET  /documents/{doc_id}      → 참조 문서 원문 조회
+- POST /summary/update          → 대화 롤링 요약 갱신(Spring이 비동기로 호출)
 """
 
 import sys
@@ -11,8 +13,12 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import APIRouter, HTTPException
-from api.schemas import ChatRequest, ChatResponse, HealthResponse, SourceDocument, DocumentDetail
+from api.schemas import (
+    ChatRequest, ChatResponse, HealthResponse, SourceDocument, DocumentDetail,
+    SummaryUpdateRequest, SummaryUpdateResponse,
+)
 from rag.pipeline import get_pipeline
+from rag.summarize import update_summary
 
 router = APIRouter()
 
@@ -36,10 +42,13 @@ async def chat(request: ChatRequest):
     try:
         pipeline = get_pipeline()
 
+        history = [{"role": h.role, "content": h.content} for h in request.history]
         result = pipeline.run(
             question=request.question,
             age=request.age,
             law_category=request.law_category,
+            history=history,
+            summary=request.summary,
         )
 
         sources = [
@@ -60,6 +69,8 @@ async def chat(request: ChatRequest):
             age_group_label=result["age_group_label"],
             question=request.question,
             age=request.age,
+            standalone_query=result.get("standalone_query"),
+            rewrite_applied=result.get("rewrite_applied", False),
         )
 
     except Exception as e:
@@ -84,3 +95,19 @@ async def get_document(doc_id: int):
         source=doc.get("source", ""),
         text=doc.get("text", ""),
     )
+
+
+# ===========================
+# 대화 요약 갱신 (Spring @Async 전용, 무상태 순수 함수)
+# ===========================
+@router.post("/summary/update", response_model=SummaryUpdateResponse)
+async def update_summary_endpoint(request: SummaryUpdateRequest):
+    try:
+        turns = [{"role": t.role, "content": t.content} for t in request.turns_to_fold]
+        summary = update_summary(request.prev_summary, turns)
+        return SummaryUpdateResponse(
+            summary=summary,
+            through_message_id=request.through_message_id,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
