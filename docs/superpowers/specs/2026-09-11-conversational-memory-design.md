@@ -1,8 +1,8 @@
 # 대화형 RAG 전환 설계 스펙
 
-- 상태: 설계 확정, 구현 계획 작성 대기
+- 상태: Phase 0·Phase 1 `main` 병합 완료(2026-09-17). Phase 1.5(Redis, D10) 설계 추가 — 구현 계획 작성 대기
 - 관련 아티팩트(비교·근거 문서): https://claude.ai/code/artifact/9c28cd4b-2c96-443b-b8a1-ff38ae32c756
-- 작성일: 2026-09-11
+- 작성일: 2026-09-11 · 최근 갱신: 2026-09-17
 
 ## 1. 배경
 
@@ -28,6 +28,7 @@
 | D7 | `@Async` 구현 원칙 | 별도 빈, 전용 executor, 예외 핸들러, DB 레벨 동시성 제어 |
 | D8 | 스키마 마이그레이션 = Flyway | `backend_spring`에 도입, `init.sql`의 1회성 문제 해결 |
 | D9 | 구현 범위 | 백엔드 수정은 `backend_spring`만. `backend/`(소스 없는 레거시 셸)는 무관 |
+| D10 | 읽기 캐시 = Redis, cache-aside | 세션 목록·대화 컨텍스트만 캐싱. 원본은 계속 MySQL, Redis 장애 시 기능은 그대로(느려지기만 함) |
 
 ## 3. 제약
 
@@ -287,6 +288,79 @@ public class ChatMemoryAsyncService {   // ChatService와 분리된 별도 빈 �
 }
 ```
 
+### 7.5 읽기 캐시 — Redis (D10, Phase 1.5)
+
+사용자·세션이 늘면서 세션 목록·대화 컨텍스트 조회가 매 요청 MySQL을 직접 때리는 게 부담이 될 걸 대비한다. Redis는 순수 읽기 캐시(cache-aside)다 — 세션·인증 저장소나 `@Async` 작업 큐로 쓰지 않는다(필요해지면 별도 스펙). **원본은 항상 MySQL이고, Redis가 죽어도 기능은 그대로 동작한다 — 느려지기만 한다.**
+
+**캐싱 대상은 딱 2개 키만.** 메시지 원문 전체나 `user_memory`는 핫패스가 아니라서 캐싱하지 않는다 — 캐싱 대비 정합성 리스크만 커진다.
+
+| 키 | 내용 | 대응하는 실제 조회 |
+|---|---|---|
+| `chat:sessions:{userId}` | 세션 목록 JSON(사이드바) | `GET /api/chat/sessions` |
+| `chat:ctx:{sessionId}` | `{최근 2턴, 롤링 요약}` 묶음 JSON | `ChatService.chat()`이 매 턴 FastAPI 호출 전 읽는 이력·요약 조회(§7.2 step 3) |
+
+**무효화는 쓰기 시 명시적으로.** TTL(5분)은 무효화를 놓쳤을 때의 안전망일 뿐, TTL에 의존하지 않는다.
+
+- 턴 저장(§7.2 step 5) 직후 → `chat:ctx:{sessionId}` 삭제
+- 세션 생성·제목 수정·삭제 → `chat:sessions:{userId}` 삭제
+- 요약 갱신(`ChatMemoryAsyncService.updateSummaryIfNeeded`) 직후 → `chat:ctx:{sessionId}` 삭제(다음 턴이 갱신된 요약을 읽도록)
+
+**Redis 장애 시 캐시 미스로 간주하고 MySQL로 즉시 폴백한다.** Spring 기본 `@Cacheable`은 이 폴백을 대신 해주지 않으므로, 전용 빈으로 직접 감싼다:
+
+```java
+@Service
+public class ChatCacheService {
+
+    @Autowired private StringRedisTemplate redis;
+    @Autowired private ChatSessionDao chatSessionDao;
+    @Autowired private ChatMessageDao chatMessageDao;
+    @Autowired private ChatSessionSummaryDao chatSessionSummaryDao;
+    @Autowired private ObjectMapper objectMapper;
+
+    private static final Duration TTL = Duration.ofMinutes(5);
+
+    public List<ChatSession> getSessions(Long userId) {
+        String key = "chat:sessions:" + userId;
+        try {
+            String cached = redis.opsForValue().get(key);
+            if (cached != null) return objectMapper.readValue(cached, new TypeReference<>() {});
+        } catch (Exception e) {
+            log.warn("Redis 조회 실패 — MySQL로 폴백: {}", e.getMessage());
+        }
+        List<ChatSession> sessions = chatSessionDao.findByUserId(userId);   // 원본
+        trySet(key, sessions);
+        return sessions;
+    }
+
+    public void invalidateSessions(Long userId) {
+        tryDelete("chat:sessions:" + userId);
+    }
+
+    // getContext(sessionId) / invalidateContext(sessionId) — 동일 패턴, chat:ctx:{sessionId} 키
+
+    private void trySet(String key, Object value) {
+        try { redis.opsForValue().set(key, objectMapper.writeValueAsString(value), TTL); }
+        catch (Exception e) { log.warn("Redis 쓰기 실패(무시 — 다음 조회가 MySQL을 다시 채움): {}", e.getMessage()); }
+    }
+
+    private void tryDelete(String key) {
+        try { redis.delete(key); }
+        catch (Exception e) { log.warn("Redis 무효화 실패(무시 — TTL이 5분 뒤 정리): {}", e.getMessage()); }
+    }
+}
+```
+
+**변경 범위:**
+
+| 계층 | 변경 |
+|---|---|
+| 의존성 | `backend_spring/pom.xml`에 `spring-boot-starter-data-redis`(Lettuce 클라이언트) |
+| 신규 빈 | `ChatCacheService` — get/set/invalidate 캡슐화, 장애 시 MySQL 폴백 |
+| 호출부 변경 | 세션 목록 컨트롤러·`ChatService.chat()`이 DAO 직접 호출 대신 `ChatCacheService`를 거침. 턴 저장·세션 CRUD·`ChatMemoryAsyncService.updateSummaryIfNeeded`가 쓰기 후 무효화 호출 |
+| 인프라 | `docker-compose.yml`에 `redis` 서비스 추가 — 로컬 전용이 아니라 실제 배포 스택에 반영 |
+
+**착수 시점:** Phase 1(이력·요약 읽기 경로)이 `main`에 병합된 뒤. 아직 만들어지지 않은/계속 바뀔 경로를 미리 캐싱하면 경로가 바뀔 때마다 캐시 로직도 다시 손대야 한다.
+
 ## 8. FastAPI 설계 (`ai/`)
 
 ### 8.1 `/chat` 스키마 변경 (`ai/api/schemas.py`)
@@ -449,6 +523,7 @@ ALLOWED_MEM_KEYS = ["role_in_case", "case_type", "key_date", "related_law"]
 | 지연 2배 | 게이트로 대부분 스킵 + 경량 재작성 모델 | §8.2 |
 | `@Async` 함정 | 별도 빈·전용 executor·예외 핸들러·DB 레벨 동시성 | §7.4 |
 | 예산 초과가 조용히 안전규칙을 자름 | 코드 레벨 하드 캡 | §8.4 |
+| Redis 장애가 기능을 막음 | cache-aside + try/catch 폴백, 무효화는 TTL이 아니라 쓰기 시 명시적으로 | §7.5 |
 
 ## 11. 평가 계획
 
@@ -480,6 +555,12 @@ ALLOWED_MEM_KEYS = ["role_in_case", "case_type", "key_date", "related_law"]
 - [ ] `/chat` 스키마에 `history`/`summary` 추가, `build_prompt` 확장 + 하드 캡
 - [ ] `/summary/update` + `ChatMemoryAsyncService.updateSummaryIfNeeded`
 - [ ] eval에 멀티턴 케이스 추가, 재작성 有/無 비교
+
+**Phase 1.5 — 읽기 캐시(D10)**
+- [ ] `spring-boot-starter-data-redis` 추가, `docker-compose.yml`에 `redis` 서비스
+- [ ] `ChatCacheService`(cache-aside, 장애 시 MySQL 폴백) — `chat:sessions:{userId}`, `chat:ctx:{sessionId}` 두 키만
+- [ ] 세션 목록 컨트롤러·`ChatService.chat()` 호출부를 `ChatCacheService` 경유로 전환
+- [ ] 턴 저장·세션 CRUD·`updateSummaryIfNeeded`에 쓰기 후 무효화 연결
 
 **Phase 2 — 장기 메모리**
 - [ ] `/memory/extract` + `ChatMemoryAsyncService.extractMemoryIfNeeded`

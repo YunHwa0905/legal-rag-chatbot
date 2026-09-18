@@ -68,6 +68,8 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       JWT_EXPIRATION: ${JWT_EXPIRATION:-86400000}
       FASTAPI_URL: ${FASTAPI_URL:-http://ai:8000}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
       CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-}
     expose:
       - "8080"
@@ -75,6 +77,8 @@ services:
       mysql:
         condition: service_healthy
       ai:
+        condition: service_started
+      redis:
         condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
@@ -200,6 +204,26 @@ services:
       timeout: 10s
       retries: 15
       start_period: 90s
+
+  # ---------------------------------------------------------
+  # 읽기 캐시 (Phase 1.5) — 세션 목록·대화 컨텍스트만 캐싱.
+  # 데이터 유실을 걱정할 필요 없는 순수 캐시라 명시적 볼륨을 안 둔다.
+  #
+  # ★ command로 영속화(RDB 스냅샷/AOF)를 껐다 — redis 공식 이미지는 기본 설정으로
+  #   돌리면 VOLUME /data가 선언돼 있어 익명 볼륨이 자동 생성되고, 기본 save
+  #   포인트(3600 1 / 300 100 / 60 10000)가 켜져 있어 대화 내용이 dump.rdb로
+  #   디스크에 그대로 스냅샷된다 — "컨테이너 재시작 = 캐시 전체 미스"가 실제로는
+  #   아니었다(최종 리뷰 I4). --save ""로 스냅샷을 끄고 --appendonly no로 AOF도
+  #   끄면 앞의 주석이 실제로 사실이 된다. maxmemory/eviction도 함께 둔다 —
+  #   TTL(5분)만으로는 폭주하는 동시 세션 수에 대한 메모리 상한이 없었다.
+  # ---------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: lexai-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    restart: unless-stopped
+    expose:
+      - "6379"
 
   # ---------------------------------------------------------
   # RDB — MySQL 8 (사용자 정보)

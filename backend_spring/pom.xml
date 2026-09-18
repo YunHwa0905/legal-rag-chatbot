@@ -18,6 +18,34 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
+    <!-- netty 버전 고정: lettuce-core 6.2.6 기본 4.1.96 -> reactor-netty 1.1.13의 4.1.101 사용 -->
+    <!-- spring-oxm/spring-context-support 버전 고정: spring-data-redis 2.7.18이 전이적으로
+         5.3.31을 끌어와 이 프로젝트의 나머지 Spring 모듈(전부 5.3.30)과 패치 버전이 어긋났다
+         — Spring Framework는 혼합 모듈 버전을 지원 대상으로 두지 않으므로, 지금은 무해해도
+         (둘 다 StringRedisTemplate/Lettuce 경로에서 안 쓰임) 나중에 spring-data-redis를
+         올릴 때 이 어긋남이 조용히 더 벌어지지 않게 명시적으로 고정한다(최종 리뷰 M3). -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-bom</artifactId>
+                <version>4.1.101.Final</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-oxm</artifactId>
+                <version>${spring.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-context-support</artifactId>
+                <version>${spring.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
         <!-- Spring MVC -->
         <dependency>
@@ -129,6 +157,24 @@
             <groupId>io.projectreactor.netty</groupId>
             <artifactId>reactor-netty-http</artifactId>
             <version>1.1.13</version>
+        </dependency>
+
+        <!-- Redis 읽기 캐시 (Phase 1.5, D10) -->
+        <dependency>
+            <groupId>org.springframework.data</groupId>
+            <artifactId>spring-data-redis</artifactId>
+            <version>2.7.18</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>io.lettuce</groupId>
+                    <artifactId>lettuce-core</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>io.lettuce</groupId>
+            <artifactId>lettuce-core</artifactId>
+            <version>6.2.6.RELEASE</version>
         </dependency>
 
         <!-- 로깅 -->

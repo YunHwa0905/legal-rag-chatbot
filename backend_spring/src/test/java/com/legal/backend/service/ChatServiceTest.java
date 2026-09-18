@@ -38,6 +38,8 @@ class ChatServiceTest {
     private ChatMessagePersistenceService chatMessagePersistenceService;
     @Mock
     private ChatMemoryAsyncService chatMemoryAsyncService;
+    @Mock
+    private ChatCacheService chatCacheService;
     @Mock(answer = Answers.RETURNS_DEEP_STUBS)
     private WebClient webClient;
 
@@ -116,6 +118,9 @@ class ChatServiceTest {
 
     @Test
     void chat_기존_세션이면_이력과_요약을_로드하고_응답_후_요약갱신을_트리거한다() {
+        when(chatCacheService.getOrLoad(anyString(), any(), any()))
+                .thenAnswer(inv -> ((java.util.function.Supplier<?>) inv.getArgument(2)).get());
+
         ChatSession mine = new ChatSession(5L, 7L, "내 대화", null, null, null);
         when(chatSessionDao.findById(5L)).thenReturn(mine);
 
@@ -148,6 +153,11 @@ class ChatServiceTest {
         verify(chatMessagePersistenceService).persistTurn(5L, "그럼 어떻게 되나요?", fastApiResponse);
         verify(chatSessionDao).touch(5L);
         verify(chatMemoryAsyncService).updateSummaryIfNeeded(5L);
+        // 턴 저장 직후 이력이 바뀌었으니 ctx 캐시를, touch()로 정렬 순서가 바뀌었으니
+        // sessions 캐시를 각각 무효화해야 한다 — 지금까지는 라이브 검증으로만 확인됐던
+        // 부분(최종 리뷰 I3)이라 여기서 회귀에 걸리도록 못박는다.
+        verify(chatCacheService).invalidate(ChatCacheService.ctxKey(5L));
+        verify(chatCacheService).invalidate(ChatCacheService.sessionsKey(7L));
     }
 
     @Test
