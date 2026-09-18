@@ -41,6 +41,8 @@ public class ChatMemoryAsyncService {
     private ChatMessageDao chatMessageDao;
     @Autowired
     private ChatSessionSummaryDao chatSessionSummaryDao;
+    @Autowired
+    private ChatCacheService chatCacheService;
 
     @Async("chatMemoryExecutor")
     public void updateSummaryIfNeeded(Long sessionId) {
@@ -73,6 +75,7 @@ public class ChatMemoryAsyncService {
 
         String newSummary = (String) result.get("summary");
         chatSessionSummaryDao.upsertIfNewer(sessionId, newSummary, newThroughId);
+        chatCacheService.invalidate(ChatCacheService.ctxKey(sessionId));
     }
 
     private List<Map<String, String>> toTurnPayload(List<ChatMessage> messages) {

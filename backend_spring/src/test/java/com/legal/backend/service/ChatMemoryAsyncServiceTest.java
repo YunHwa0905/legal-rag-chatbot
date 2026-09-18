@@ -29,6 +29,8 @@ class ChatMemoryAsyncServiceTest {
     private ChatSessionSummaryDao chatSessionSummaryDao;
     @Mock(answer = Answers.RETURNS_DEEP_STUBS)
     private WebClient webClient;
+    @Mock
+    private ChatCacheService chatCacheService;
 
     @InjectMocks
     private ChatMemoryAsyncService chatMemoryAsyncService;
@@ -67,6 +69,7 @@ class ChatMemoryAsyncServiceTest {
         chatMemoryAsyncService.updateSummaryIfNeeded(5L);
 
         verify(chatSessionSummaryDao).upsertIfNewer(5L, "새 요약", 6L);
+        verify(chatCacheService).invalidate(ChatCacheService.ctxKey(5L));
     }
 
     @Test
