@@ -153,6 +153,11 @@ class ChatServiceTest {
         verify(chatMessagePersistenceService).persistTurn(5L, "그럼 어떻게 되나요?", fastApiResponse);
         verify(chatSessionDao).touch(5L);
         verify(chatMemoryAsyncService).updateSummaryIfNeeded(5L);
+        // 턴 저장 직후 이력이 바뀌었으니 ctx 캐시를, touch()로 정렬 순서가 바뀌었으니
+        // sessions 캐시를 각각 무효화해야 한다 — 지금까지는 라이브 검증으로만 확인됐던
+        // 부분(최종 리뷰 I3)이라 여기서 회귀에 걸리도록 못박는다.
+        verify(chatCacheService).invalidate(ChatCacheService.ctxKey(5L));
+        verify(chatCacheService).invalidate(ChatCacheService.sessionsKey(7L));
     }
 
     @Test

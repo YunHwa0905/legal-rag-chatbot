@@ -51,6 +51,10 @@ public class ChatSessionService {
         getOwnedSession(id, userId);
         chatSessionDao.softDelete(id);
         chatCacheService.invalidate(ChatCacheService.sessionsKey(userId));
+        // 삭제된 세션의 대화 내용(이력+요약)이 캐시에 최대 5분간 남아있지 않게 함께 비운다.
+        // findById가 deleted_at을 걸러 어차피 재조회는 안 되지만(정확성 문제는 아님),
+        // 법률 상담 내용을 삭제 요청 후에도 캐시에 남겨둘 이유가 없다.
+        chatCacheService.invalidate(ChatCacheService.ctxKey(id));
     }
 
     private ChatSessionResponse toResponse(ChatSession s) {

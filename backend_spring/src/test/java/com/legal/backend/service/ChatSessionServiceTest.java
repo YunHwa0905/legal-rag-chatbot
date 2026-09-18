@@ -12,6 +12,7 @@ import java.time.LocalDateTime;
 import java.util.NoSuchElementException;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -19,6 +20,8 @@ class ChatSessionServiceTest {
 
     @Mock
     private ChatSessionDao chatSessionDao;
+    @Mock
+    private ChatCacheService chatCacheService;
 
     @InjectMocks
     private ChatSessionService chatSessionService;
@@ -46,5 +49,28 @@ class ChatSessionServiceTest {
         when(chatSessionDao.findById(1L)).thenReturn(session);
 
         assertThrows(NoSuchElementException.class, () -> chatSessionService.getOwnedSession(1L, 7L));
+    }
+
+    @Test
+    void renameSession_성공하면_세션_목록_캐시를_무효화한다() {
+        ChatSession session = new ChatSession(1L, 7L, "제목", LocalDateTime.now(), LocalDateTime.now(), null);
+        when(chatSessionDao.findById(1L)).thenReturn(session);
+
+        chatSessionService.renameSession(1L, 7L, "새 제목");
+
+        verify(chatSessionDao).updateTitle(1L, "새 제목");
+        verify(chatCacheService).invalidate(ChatCacheService.sessionsKey(7L));
+    }
+
+    @Test
+    void deleteSession_성공하면_세션_목록과_대화_컨텍스트_캐시를_모두_무효화한다() {
+        ChatSession session = new ChatSession(1L, 7L, "제목", LocalDateTime.now(), LocalDateTime.now(), null);
+        when(chatSessionDao.findById(1L)).thenReturn(session);
+
+        chatSessionService.deleteSession(1L, 7L);
+
+        verify(chatSessionDao).softDelete(1L);
+        verify(chatCacheService).invalidate(ChatCacheService.sessionsKey(7L));
+        verify(chatCacheService).invalidate(ChatCacheService.ctxKey(1L));
     }
 }

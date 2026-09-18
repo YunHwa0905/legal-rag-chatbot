@@ -68,13 +68,23 @@
     -->
     <bean id="redisStandaloneConfiguration"
           class="org.springframework.data.redis.connection.RedisStandaloneConfiguration">
-        <constructor-arg index="0" value="${redis.host}"/>
-        <constructor-arg index="1" value="${redis.port}" type="int"/>
+        <constructor-arg index="0" value="${redis.host:localhost}"/>
+        <constructor-arg index="1" value="${redis.port:6379}" type="int"/>
     </bean>
 
+    <!--
+        기본 커맨드 타임아웃(60초)을 짧게 줄인다 — Redis가 완전히 죽어서 연결이
+        즉시 거부되는 경우(docker stop)는 try/catch가 마이크로초 단위로 처리하지만,
+        Redis가 응답 없이 걸려만 있는 경우(네트워크 단절, OOM, BGSAVE 정체 등)엔
+        기본값 그대로면 요청 스레드가 60초씩 묶여 Tomcat 스레드풀이 고갈될 수 있다 —
+        "Redis 장애는 절대 요청을 실패시키면 안 된다"는 이 기능의 핵심 전제를 정확히
+        뒤집는 실패 모드다. setTimeout은 구버전 API지만 spring-data-redis 2.7에서도
+        실제로 동작한다(내부적으로 LettuceClientConfiguration의 commandTimeout에 반영됨).
+    -->
     <bean id="redisConnectionFactory"
           class="org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory">
         <constructor-arg ref="redisStandaloneConfiguration"/>
+        <property name="timeout" value="300"/>
     </bean>
 
     <bean id="stringRedisTemplate" class="org.springframework.data.redis.core.StringRedisTemplate">

@@ -41,7 +41,11 @@ public class ChatCacheService {
         try {
             redis.delete(key);
         } catch (Exception e) {
-            log.warn("Redis 무효화 실패(무시 — TTL {}분 뒤 자연 정리): key={}, {}", TTL.toMinutes(), key, e.getMessage());
+            // e.getMessage()가 아니라 e.toString()을 남긴다 — 클래스명이 로그에 그대로
+            // 보여야 "Redis 장애"와 "역직렬화 버그"를 구분할 수 있다(Task 2의 Critical이
+            // InvalidDefinitionException을 이 catch-all이 그냥 "Redis 조회 실패"로 뭉뚱그려
+            // 놓쳤던 바로 그 문제 — 최종 리뷰 M2).
+            log.warn("Redis 무효화 실패(무시 — TTL {}분 뒤 자연 정리): key={}, {}", TTL.toMinutes(), key, e.toString());
         }
     }
 
@@ -50,7 +54,7 @@ public class ChatCacheService {
             String json = redis.opsForValue().get(key);
             return json != null ? OBJECT_MAPPER.readValue(json, type) : null;
         } catch (Exception e) {
-            log.warn("Redis 조회 실패 — MySQL로 폴백: key={}, {}", key, e.getMessage());
+            log.warn("Redis 조회 실패 — MySQL로 폴백: key={}, {}", key, e.toString());
             return null;
         }
     }
@@ -59,7 +63,7 @@ public class ChatCacheService {
         try {
             redis.opsForValue().set(key, OBJECT_MAPPER.writeValueAsString(value), TTL);
         } catch (Exception e) {
-            log.warn("Redis 쓰기 실패(무시 — 다음 조회가 MySQL을 다시 채움): key={}, {}", key, e.getMessage());
+            log.warn("Redis 쓰기 실패(무시 — 다음 조회가 MySQL을 다시 채움): key={}, {}", key, e.toString());
         }
     }
 
