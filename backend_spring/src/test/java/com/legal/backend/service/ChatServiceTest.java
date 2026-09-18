@@ -38,6 +38,8 @@ class ChatServiceTest {
     private ChatMessagePersistenceService chatMessagePersistenceService;
     @Mock
     private ChatMemoryAsyncService chatMemoryAsyncService;
+    @Mock
+    private ChatCacheService chatCacheService;
     @Mock(answer = Answers.RETURNS_DEEP_STUBS)
     private WebClient webClient;
 
@@ -116,6 +118,9 @@ class ChatServiceTest {
 
     @Test
     void chat_기존_세션이면_이력과_요약을_로드하고_응답_후_요약갱신을_트리거한다() {
+        when(chatCacheService.getOrLoad(anyString(), any(), any()))
+                .thenAnswer(inv -> ((java.util.function.Supplier<?>) inv.getArgument(2)).get());
+
         ChatSession mine = new ChatSession(5L, 7L, "내 대화", null, null, null);
         when(chatSessionDao.findById(5L)).thenReturn(mine);
 

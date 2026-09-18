@@ -1,8 +1,10 @@
 package com.legal.backend.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.legal.backend.dao.ChatMessageDao;
 import com.legal.backend.dao.ChatSessionDao;
 import com.legal.backend.dao.ChatSessionSummaryDao;
+import com.legal.backend.dto.ChatContextCache;
 import com.legal.backend.dto.ChatRequest;
 import com.legal.backend.dto.ChatResponse;
 import com.legal.backend.entity.ChatMessage;
@@ -46,19 +48,22 @@ public class ChatService {
     private ChatMessagePersistenceService chatMessagePersistenceService;
     @Autowired
     private ChatMemoryAsyncService chatMemoryAsyncService;
+    @Autowired
+    private ChatCacheService chatCacheService;
 
     public ChatResponse chat(ChatRequest req, Long userId, int age) {
         // FastAPI 호출 전: 이미 존재하는 내 세션이면 이력·요약을 실어 보낸다.
         // (세션을 새로 만들지는 않는다 — 그건 FastAPI 성공 후 resolveSession의 몫.
         //  Finding 1: 응답 실패 시 세션이 생기면 안 된다는 불변조건을 유지하기 위함)
         ChatSession existing = findOwnedSession(req.getSessionId(), userId);
+        ChatContextCache ctx = existing != null ? loadContext(existing.getId()) : new ChatContextCache(List.of(), null);
 
         Map<String, Object> body = new HashMap<>();
         body.put("question", req.getQuestion());
         body.put("age", age);
         body.put("law_category", req.getLawCategory());
-        body.put("history", existing != null ? historyPayload(existing.getId()) : List.of());
-        body.put("summary", existing != null ? summaryText(existing.getId()) : null);
+        body.put("history", ctx.getHistory());
+        body.put("summary", ctx.getSummary());
 
         ChatResponse response = webClient.post()
                 .uri("/api/v1/chat")
@@ -73,7 +78,9 @@ public class ChatService {
 
         ChatSession session = resolveSession(req.getSessionId(), userId, req.getQuestion());
         chatMessagePersistenceService.persistTurn(session.getId(), req.getQuestion(), response);
+        chatCacheService.invalidate(ChatCacheService.ctxKey(session.getId()));   // 이력이 방금 바뀜
         chatSessionDao.touch(session.getId());
+        chatCacheService.invalidate(ChatCacheService.sessionsKey(userId));      // updated_at 바뀌어 목록 정렬도 바뀜
         triggerSummaryUpdate(session.getId());
 
         response.setSessionId(session.getId());
@@ -103,6 +110,14 @@ public class ChatService {
         }
         ChatSession existing = chatSessionDao.findById(sessionId);
         return (existing != null && existing.getUserId().equals(userId)) ? existing : null;
+    }
+
+    private ChatContextCache loadContext(Long sessionId) {
+        return chatCacheService.getOrLoad(
+                ChatCacheService.ctxKey(sessionId),
+                new TypeReference<ChatContextCache>() {},
+                () -> new ChatContextCache(historyPayload(sessionId), summaryText(sessionId))
+        );
     }
 
     private List<Map<String, String>> historyPayload(Long sessionId) {
