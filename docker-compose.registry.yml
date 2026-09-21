@@ -1,0 +1,42 @@
+# ===========================================================
+# Registry 배포 구성 — 소스 빌드 없이 이미지를 받아서 기동합니다.
+#
+# 사용법:
+#   docker compose -f docker-compose.yml -f docker-compose.registry.yml pull
+#   docker compose -f docker-compose.yml -f docker-compose.registry.yml up -d --no-build
+#
+# 왜 별도 파일인가:
+#   docker-compose.yml 은 build: 로 소스에서 이미지를 만듭니다. 이관 대상
+#   환경에는 소스도 빌드 캐시도 없으므로, 그 build: 를 지우고 image: 만
+#   남긴 구성이 따로 필요합니다. 본체를 고치지 않고 덮어쓰는 방식이라
+#   healthcheck·의존성·볼륨 정의는 그대로 재사용됩니다.
+#
+#   ★ build: !reset null 은 Compose v2.24+ 문법입니다. 이 값이 없으면
+#     본체의 build: 가 살아남아 소스가 없는 환경에서 빌드를 시도합니다.
+#
+# 레지스트리 전환:
+#   REGISTRY_PREFIX 만 바꾸면 Docker Hub / ECR / Artifact Registry / ACR
+#   어디로든 갑니다. .env 에 넣거나 명령 앞에 붙이세요.
+#
+#     Docker Hub : REGISTRY_PREFIX=yunhwa0905
+#     ECR        : REGISTRY_PREFIX=<계정ID>.dkr.ecr.ap-northeast-2.amazonaws.com
+#     GAR        : REGISTRY_PREFIX=asia-northeast3-docker.pkg.dev/<프로젝트>/<저장소>
+#     ACR        : REGISTRY_PREFIX=<레지스트리>.azurecr.io
+#
+#   IMAGE_TAG 는 고정 태그를 쓰세요. latest 는 어느 이미지가 떴는지
+#   추적이 안 돼서 이관 검증에 부적합합니다.
+# ===========================================================
+
+services:
+
+  frontend:
+    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-frontend:${IMAGE_TAG:-v1}
+    build: !reset null
+
+  tomcat:
+    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-tomcat:${IMAGE_TAG:-v1}
+    build: !reset null
+
+  ai:
+    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-ai:${IMAGE_TAG:-v1}
+    build: !reset null
