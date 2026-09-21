@@ -131,6 +131,9 @@ services:
         condition: service_healthy
       ollama:
         condition: service_started
+      # 모델 준비가 끝난 뒤에 뜹니다 — "컨테이너는 다 올라왔는데 채팅만 실패" 를 막습니다.
+      ollama-init:
+        condition: service_completed_successfully
     healthcheck:
       # 앱 시작 시 lifespan 에서 임베딩 모델을 미리 로드하므로
       # 최초 기동은 수십 초~수 분 걸립니다. start_period 를 넉넉히 둡니다.
@@ -170,6 +173,53 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
+
+  # ---------------------------------------------------------
+  # 모델 준비 — 일회성 초기화 (deploy/ollama-init.sh 를 대체)
+  #
+  #   ollama 이미지에는 모델이 들어있지 않고, ollama create 는 데몬이 떠 있어야
+  #   동작합니다. 그래서 빌드 시점이 아니라 기동 직후에 한 번 돌려야 합니다.
+  #   이 서비스가 그 역할을 맡아 docker compose up -d 한 번으로 모델까지
+  #   준비되게 합니다 — 이관 시 "명령 하나로 환경이 올라오는지" 가 중요합니다.
+  #
+  #   pull 은 캐시되고 생성 여부를 먼저 확인하므로 여러 번 실행해도 안전합니다.
+  #
+  #   $$ 는 compose 변수 치환을 피해 셸로 그대로 넘기기 위한 이스케이프입니다.
+  #   ${OLLAMA_MODEL} 처럼 $ 가 하나인 것은 .env 에서 읽어오려는 의도입니다.
+  # ---------------------------------------------------------
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: lexai-ollama-init
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      # CLI 가 바라볼 서버 주소 (ollama 서비스의 바인딩 주소와는 별개입니다)
+      OLLAMA_HOST: http://ollama:11434
+      TARGET_MODEL: ${OLLAMA_MODEL:-legal-gemma}
+      REWRITE_MODEL: ${OLLAMA_REWRITE_MODEL:-gemma3:1b}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        if ollama list | grep -q "^$${TARGET_MODEL}"; then
+          echo "[SKIP] $${TARGET_MODEL} 이미 존재"
+        else
+          BASE=""
+          for tag in gemma3:4b-it-q8_0 gemma3:4b; do
+            if ollama pull "$$tag"; then BASE="$$tag"; break; fi
+          done
+          [ -n "$$BASE" ] || { echo "[FATAL] 베이스 모델 다운로드 실패"; exit 1; }
+          { echo "FROM $$BASE"; echo "PARAMETER temperature 0.1"; echo "PARAMETER top_p 0.9"; echo "PARAMETER num_ctx 4096"; echo "PARAMETER repeat_penalty 1.1"; } > /tmp/Modelfile
+          ollama create "$${TARGET_MODEL}" -f /tmp/Modelfile
+        fi
+        if ollama list | grep -q "^$${REWRITE_MODEL}"; then
+          echo "[SKIP] $${REWRITE_MODEL} 이미 존재"
+        else
+          ollama pull "$${REWRITE_MODEL}"
+        fi
+        echo "[DONE] 모델 준비 완료"
 
   # ---------------------------------------------------------
   # 벡터 DB — OpenSearch 2.13 (단일 노드)
