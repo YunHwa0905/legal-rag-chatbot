@@ -13,8 +13,8 @@
     </select>
 
     <!--
-        최근 limit개를 id DESC로 뽑은 뒤 다시 ASC로 정렬 — MySQL은 LIMIT 뒤에
-        곧바로 다시 정렬할 수 없어 서브쿼리(derived table)로 감싼다.
+        최근 limit개를 id DESC로 뽑은 뒤 다시 ASC로 정렬 — LIMIT 뒤에 곧바로
+        다시 정렬할 수는 없어 서브쿼리로 감싼다. SQLite 에서도 동일하다.
     -->
     <select id="findRecentMessages" resultType="ChatMessage">
         SELECT id, session_id AS sessionId, role, content,

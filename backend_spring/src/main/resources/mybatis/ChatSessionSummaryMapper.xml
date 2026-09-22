@@ -10,13 +10,25 @@
         WHERE session_id = #{sessionId}
     </select>
 
+    <!--
+        MySQL 의 ON DUPLICATE KEY UPDATE + IF() 를 SQLite 의 UPSERT 로 옮긴 것.
+
+        원래 의도는 "늦게 도착한 오래된 요약이 최신 요약을 덮어쓰지 못하게" 하는
+        것이었고, MySQL 에서는 컬럼마다 IF() 로 옛 값을 다시 써넣는 방식이었습니다.
+        SQLite 는 DO UPDATE 에 WHERE 를 붙일 수 있어서, 조건이 맞지 않으면 갱신
+        자체를 건너뜁니다 — 같은 의도를 더 짧고 정확하게 표현합니다.
+
+        excluded 는 INSERT 하려다 충돌난 쪽의 값을 가리킵니다(SQLite 3.24+).
+    -->
     <insert id="upsertIfNewer">
         <![CDATA[
-        INSERT INTO chat_session_summary (session_id, summary, through_message_id)
-        VALUES (#{sessionId}, #{summary}, #{throughMessageId})
-        ON DUPLICATE KEY UPDATE
-            summary = IF(through_message_id < #{throughMessageId}, #{summary}, summary),
-            through_message_id = IF(through_message_id < #{throughMessageId}, #{throughMessageId}, through_message_id)
+        INSERT INTO chat_session_summary (session_id, summary, through_message_id, updated_at)
+        VALUES (#{sessionId}, #{summary}, #{throughMessageId}, datetime('now','localtime'))
+        ON CONFLICT(session_id) DO UPDATE SET
+            summary            = excluded.summary,
+            through_message_id = excluded.through_message_id,
+            updated_at         = excluded.updated_at
+        WHERE chat_session_summary.through_message_id < excluded.through_message_id
         ]]>
     </insert>
 

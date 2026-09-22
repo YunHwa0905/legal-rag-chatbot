@@ -18,13 +18,38 @@
             expression="org.springframework.stereotype.Controller"/>
     </context:component-scan>
 
+    <!--
+        SQLite DataSource.
+
+        MySQL 과 다른 점 세 가지:
+
+        1) username/password 가 없습니다. SQLite 는 파일 권한이 곧 접근 제어입니다.
+
+        2) 풀 크기를 10 -> 5 로 줄였습니다. SQLite 는 writer 가 하나뿐이라
+           커넥션을 늘려도 쓰기는 직렬화됩니다. WAL 덕분에 읽기는 병렬로 도니
+           읽기 동시성만큼만 남깁니다.
+
+        3) dataSourceProperties 의 세 PRAGMA 가 핵심입니다.
+           - foreign_keys : SQLite 는 기본이 OFF 라, 걸지 않으면 스키마의 FK 가
+                            선언만 되고 실제로 검사되지 않습니다.
+           - busy_timeout : 비동기 요약/기억추출 스레드와 요청 스레드가 동시에
+                            쓰므로, 없으면 SQLITE_BUSY 가 즉시 예외로 터집니다.
+                            5초 동안 재시도하게 둡니다.
+           - journal_mode : WAL. 스키마 파일에서 한 번 걸면 DB 에 유지되지만,
+                            새로 만들어진 파일에도 확실히 적용되도록 여기서도 지정합니다.
+    -->
     <bean id="dataSource" class="com.zaxxer.hikari.HikariDataSource" destroy-method="close">
         <property name="driverClassName" value="${db.driver.Class}"/>
         <property name="jdbcUrl"         value="${db.url}"/>
-        <property name="username"        value="${db.username}"/>
-        <property name="password"        value="${db.password}"/>
-        <property name="maximumPoolSize" value="10"/>
+        <property name="maximumPoolSize" value="5"/>
         <property name="connectionTimeout" value="30000"/>
+        <property name="dataSourceProperties">
+            <props>
+                <prop key="foreign_keys">true</prop>
+                <prop key="busy_timeout">5000</prop>
+                <prop key="journal_mode">WAL</prop>
+            </props>
+        </property>
     </bean>
 
     <!--

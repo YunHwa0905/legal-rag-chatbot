@@ -27,12 +27,20 @@
         UPDATE chat_session SET title = #{title} WHERE id = #{id}
     </update>
 
+    <!--
+        NOW() -> datetime('now','localtime')
+
+        SQLite 의 CURRENT_TIMESTAMP 는 UTC 라, 스키마의 기본값
+        datetime('now','localtime') 과 섞이면 같은 테이블 안에서 9시간 어긋난 값이
+        생깁니다. 시각을 넣는 모든 자리에서 localtime 으로 통일합니다.
+        (localtime 이 KST 가 되려면 프로세스에 TZ=Asia/Seoul 이 필요합니다)
+    -->
     <update id="softDelete">
-        UPDATE chat_session SET deleted_at = NOW() WHERE id = #{id}
+        UPDATE chat_session SET deleted_at = datetime('now','localtime') WHERE id = #{id}
     </update>
 
     <update id="touch">
-        UPDATE chat_session SET updated_at = NOW() WHERE id = #{id}
+        UPDATE chat_session SET updated_at = datetime('now','localtime') WHERE id = #{id}
     </update>
 
 </mapper>
