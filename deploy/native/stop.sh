@@ -70,6 +70,25 @@ if want tomcat && port_in_use "$TOMCAT_PORT"; then
 fi
 want ai         && stop_pid "AI 서버"     "$PID_DIR/ai.pid"
 want opensearch && stop_pid "OpenSearch" "$PID_DIR/opensearch.pid"
+# 안전망: PID 파일 없이 떠 있는 경우입니다. 손으로 띄웠거나, start.sh 가
+# "포트가 이미 열려 있음"으로 판단해 건너뛰면 PID 파일이 만들어지지 않습니다.
+# 포트가 남아 있으면 다음 기동이 "이미 실행 중"으로 오판하므로 정리합니다.
+if want opensearch && port_in_use "$OPENSEARCH_PORT"; then
+    warn "OpenSearch 포트가 아직 열려 있어 프로세스를 직접 찾습니다"
+    os_pid=$(pgrep -u "$(id -u)" -f "org.opensearch.bootstrap.OpenSearch" | head -1)
+    if [ -n "$os_pid" ]; then
+        kill -TERM "$os_pid" 2>/dev/null
+        waited=0
+        while kill -0 "$os_pid" 2>/dev/null && [ "$waited" -lt 60 ]; do
+            sleep 2; waited=$((waited + 2))
+        done
+        kill -0 "$os_pid" 2>/dev/null && kill -KILL "$os_pid" 2>/dev/null
+        ok "OpenSearch 종료 (PID $os_pid, ${waited}s)"
+    else
+        warn "포트는 열려 있는데 프로세스를 찾지 못했습니다 — 직접 확인하세요"
+        ss -tlnp 2>/dev/null | grep ":$OPENSEARCH_PORT " | head -1
+    fi
+fi
 
 if [ "$TARGET" = "all-with-ollama" ] || [ "$TARGET" = "ollama" ]; then
     sudo systemctl stop ollama && ok "Ollama 종료"
