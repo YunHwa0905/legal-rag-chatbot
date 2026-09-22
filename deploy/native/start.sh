@@ -51,8 +51,14 @@ if want opensearch; then
                 > "$LOG_DIR/opensearch.log" 2>&1
         )
         load_opensearch_creds
-        wait_for "OpenSearch" 180 os_curl "$OS_BASE/_cluster/health" \
-            || die "기동 실패 — $LOG_DIR/opensearch.log 확인"
+        if ! wait_for "OpenSearch" 180 os_curl "$OS_BASE/_cluster/health"; then
+            die "기동 실패 — $LOG_DIR/opensearch.log 확인"
+        fi
+        # 샤드 복구까지 기다립니다. 응답만 보고 넘어가면 다음 단계의 _count 가
+        # 빈 값을 받아 "색인 없음"으로 오판합니다.
+        if ! wait_for "샤드 복구" 180 os_ready; then
+            warn "클러스터 상태가 yellow/green 이 아닙니다 — 색인 조회가 실패할 수 있습니다"
+        fi
         ok "기동 (PID $(cat "$PID_DIR/opensearch.pid" 2>/dev/null || echo '?'))"
     fi
 fi

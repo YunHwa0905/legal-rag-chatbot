@@ -78,6 +78,14 @@ if ! port_in_use "$OPENSEARCH_PORT"; then
     bash "$(dirname "${BASH_SOURCE[0]}")/start.sh" opensearch
 fi
 
+# 이미 떠 있던 경우에도 복구 중일 수 있으므로 여기서 한 번 더 확인합니다.
+# 기동 직후에는 _cluster/health 가 200 을 주면서도 샤드 복구가 끝나지 않아
+# _count 가 실패하고, 그걸 "색인 없음"으로 읽으면 멀쩡한 색인을 두고
+# 복원을 시도하게 됩니다.
+if ! wait_for "클러스터 준비" 180 os_ready; then
+    die "클러스터가 준비되지 않았습니다 — $LOG_DIR/opensearch.log 확인"
+fi
+
 count=$(os_curl "$OS_BASE/${INDEX_NAME}/_count" | grep -o '"count":[0-9]*' | cut -d: -f2 || true)
 if [ -n "${count:-}" ] && [ "$count" -gt 0 ] 2>/dev/null; then
     ok "색인이 이미 있습니다 (${count}건) — 복원 건너뜀"
@@ -101,8 +109,16 @@ else
         -d "{\"type\":\"fs\",\"settings\":{\"location\":\"${SNAPSHOT_DIR}\"}}" >/dev/null
     ok "스냅샷 저장소 등록"
 
-    state=$(os_curl "$OS_BASE/_cat/snapshots/${SNAPSHOT_REPO}?h=id,status" | grep "^${SNAPSHOT_NAME} " | awk '{print $2}')
-    [ "$state" = "SUCCESS" ] || die "스냅샷 상태가 SUCCESS 가 아닙니다: ${state:-없음}"
+    # ★ || true 가 없으면 grep 이 못 찾았을 때 pipefail 로 대입문 자체가 실패하고,
+    #   set -e 가 die 를 실행하기도 전에 스크립트를 죽입니다. 원인 메시지 없이
+    #   종료되는 가장 나쁜 실패 방식이라 반드시 막아둡니다.
+    state=$( { os_curl "$OS_BASE/_cat/snapshots/${SNAPSHOT_REPO}?h=id,status" \
+        | grep "^${SNAPSHOT_NAME} " | awk '{print $2}'; } || true )
+    if [ "$state" != "SUCCESS" ]; then
+        warn "저장소에 있는 스냅샷 목록:"
+        os_curl "$OS_BASE/_cat/snapshots/${SNAPSHOT_REPO}?v" || true
+        die "스냅샷 '${SNAPSHOT_NAME}' 의 상태가 SUCCESS 가 아닙니다: ${state:-없음}"
+    fi
 
     log "   복원 중 (수 분 걸립니다)"
     started=$(date +%s)

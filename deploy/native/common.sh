@@ -85,6 +85,15 @@ os_curl() {
     curl -sk -u "${OPENSEARCH_USER}:${OPENSEARCH_PASSWORD}" "$@"
 }
 
+# 노드가 응답하는 것과 인덱스를 읽을 수 있는 것은 다릅니다. 기동 직후에는
+# _cluster/health 가 200 을 주면서도 샤드 복구가 끝나지 않아 _count 가 실패합니다.
+# 그 상태에서 "색인이 없다"고 판단하면 멀쩡한 색인을 두고 복원을 시도하게 됩니다.
+os_ready() {
+    local st
+    st=$(os_curl "$OS_BASE/_cluster/health" 2>/dev/null | grep -o '"status":"[a-z]*"' | cut -d'"' -f4) || return 1
+    [ "$st" = "yellow" ] || [ "$st" = "green" ]
+}
+
 # -----------------------------------------------------------
 # k-NN 네이티브 라이브러리 경로
 #
