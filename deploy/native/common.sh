@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# ===========================================================
+# 공통 설정 — 다른 스크립트가 source 해서 씁니다.
+#
+#   source "$(dirname "$0")/common.sh"
+#
+# 직접 실행하는 스크립트가 아닙니다.
+# ===========================================================
+
+set -euo pipefail
+
+# -----------------------------------------------------------
+# 경로
+# -----------------------------------------------------------
+REPO_DIR="${REPO_DIR:-$HOME/legal-rag-chatbot}"
+OPENSEARCH_VERSION="${OPENSEARCH_VERSION:-2.13.0}"
+OPENSEARCH_HOME="${OPENSEARCH_HOME:-$HOME/opensearch-${OPENSEARCH_VERSION}}"
+SNAPSHOT_DIR="${SNAPSHOT_DIR:-$HOME/lexai-snapshots}"
+DATA_DIR="${DATA_DIR:-$HOME/lexai-data}"
+DB_PATH="${DB_PATH:-$DATA_DIR/lexai.db}"
+RUN_DIR="${RUN_DIR:-$HOME/lexai-run}"
+LOG_DIR="$RUN_DIR/logs"
+PID_DIR="$RUN_DIR/pids"
+
+# -----------------------------------------------------------
+# 포트
+#
+# ★ localhost 가 아니라 127.0.0.1 을 씁니다. Node 17+ 는 DNS 응답 순서를
+#   그대로 따르는데 localhost 가 ::1(IPv6) 로 먼저 해석되는 반면 Tomcat 은
+#   IPv4 에만 바인딩돼 있어 연결이 거부됩니다. 실제로 겪은 문제입니다.
+# -----------------------------------------------------------
+FRONTEND_PORT="${FRONTEND_PORT:-3000}"
+AI_PORT="${AI_PORT:-8000}"
+TOMCAT_PORT="${TOMCAT_PORT:-8181}"
+TOMCAT_CONTEXT="${TOMCAT_CONTEXT:-/backend_spring}"
+OPENSEARCH_PORT="${OPENSEARCH_PORT:-9200}"
+OLLAMA_PORT="${OLLAMA_PORT:-11434}"
+
+API_BASE="http://127.0.0.1:${TOMCAT_PORT}${TOMCAT_CONTEXT}"
+OS_BASE="https://127.0.0.1:${OPENSEARCH_PORT}"
+
+# -----------------------------------------------------------
+# 타임존
+#
+# 스키마와 매퍼가 시각을 datetime('now','localtime') 으로 기록합니다.
+# 이 localtime 은 JVM 설정이 아니라 프로세스의 OS 타임존을 따르므로,
+# 설정하지 않으면 UTC 로 기록되어 9시간 어긋납니다.
+# -----------------------------------------------------------
+export TZ="${TZ:-Asia/Seoul}"
+
+# -----------------------------------------------------------
+# 출력 헬퍼
+# -----------------------------------------------------------
+log()  { printf '\033[0;36m[%s]\033[0m %s\n' "$(date +%H:%M:%S)" "$*"; }
+ok()   { printf '\033[0;32m  OK\033[0m   %s\n' "$*"; }
+warn() { printf '\033[0;33m  WARN\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[0;31m  FATAL\033[0m %s\n' "$*" >&2; exit 1; }
+
+# -----------------------------------------------------------
+# .env 에서 값 하나 읽기
+#
+# source 하지 않는 이유: .env 의 DB_URL 같은 값에 & 가 들어 있어서
+# 셸이 백그라운드 실행으로 해석해 버립니다. 필요한 키만 꺼내 씁니다.
+# -----------------------------------------------------------
+env_value() {
+    local key="$1"
+    [ -f "$REPO_DIR/.env" ] || die ".env 가 없습니다: $REPO_DIR/.env"
+    # set -o pipefail 때문에 grep 이 못 찾으면 파이프라인이 실패로 잡힙니다.
+    # 값이 없는 것은 호출한 쪽이 판단할 일이라 여기서는 빈 문자열을 돌려줍니다.
+    { grep "^${key}=" "$REPO_DIR/.env" | head -1 | cut -d= -f2- ; } || true
+}
+
+# -----------------------------------------------------------
+# OpenSearch 접속 정보 (지연 로딩)
+# -----------------------------------------------------------
+load_opensearch_creds() {
+    OPENSEARCH_USER="${OPENSEARCH_USER:-$(env_value OPENSEARCH_USER || echo admin)}"
+    OPENSEARCH_USER="${OPENSEARCH_USER:-admin}"
+    OPENSEARCH_PASSWORD="$(env_value OPENSEARCH_PASSWORD)"
+    [ -n "$OPENSEARCH_PASSWORD" ] || die ".env 에 OPENSEARCH_PASSWORD 가 비어 있습니다"
+    export OPENSEARCH_USER OPENSEARCH_PASSWORD
+}
+
+os_curl() {
+    curl -sk -u "${OPENSEARCH_USER}:${OPENSEARCH_PASSWORD}" "$@"
+}
+
+# -----------------------------------------------------------
+# k-NN 네이티브 라이브러리 경로
+#
+# ★ 이게 없으면 벡터 검색이 들어오는 순간 노드가 죽습니다
+#   (UnsatisfiedLinkError: no opensearchknn_nmslib in java.library.path).
+#   Deep Learning AMI 가 LD_LIBRARY_PATH 를 미리 채워두는 탓에 k-NN
+#   플러그인이 자기 라이브러리 경로를 넣지 못해서 생깁니다.
+#   BM25 만 쓰면 멀쩡히 돌기 때문에 기동 확인만으로는 절대 안 잡힙니다.
+# -----------------------------------------------------------
+export_knn_lib_path() {
+    local knn_lib="$OPENSEARCH_HOME/plugins/opensearch-knn/lib"
+    [ -d "$knn_lib" ] || die "k-NN 라이브러리 디렉터리가 없습니다: $knn_lib"
+    export LD_LIBRARY_PATH="${knn_lib}:${LD_LIBRARY_PATH:-}"
+}
+
+# -----------------------------------------------------------
+# 포트 점유 확인
+# -----------------------------------------------------------
+port_in_use() {
+    ss -tln 2>/dev/null | grep -q ":$1 "
+}
+
+# 조건이 참이 될 때까지 대기. wait_for <설명> <최대초> <명령...>
+wait_for() {
+    local label="$1" timeout="$2"; shift 2
+    local waited=0
+    printf '       %s 대기' "$label"
+    while ! "$@" >/dev/null 2>&1; do
+        if [ "$waited" -ge "$timeout" ]; then
+            printf '\n'; return 1
+        fi
+        sleep 3; waited=$((waited + 3)); printf '.'
+    done
+    printf ' (%ds)\n' "$waited"
+    return 0
+}
+
+mkdir -p "$LOG_DIR" "$PID_DIR"

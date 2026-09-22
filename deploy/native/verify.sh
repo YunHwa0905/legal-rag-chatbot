@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# ===========================================================
+# 합격 기준 자동 검증
+#
+#   bash deploy/native/verify.sh
+#
+# 결과를 ~/lexai-run/results.csv 에 한 줄씩 누적합니다. 환경을 오갈 때마다
+# 같은 기준으로 재기 위한 것입니다 — 12회쯤 반복하면 손으로 curl 을 치는
+# 방식으로는 "이번엔 좀 느렸나?" 수준의 인상 비교밖에 안 남습니다.
+#
+# 환경 이름을 붙이려면: FORM=gcp-shell bash deploy/native/verify.sh
+# ===========================================================
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+
+# 검증 자체는 실패해도 끝까지 돌아야 합니다(어디까지 되는지 보려고).
+set +e
+
+FORM="${FORM:-shell-native}"
+RESULTS="$RUN_DIR/results.csv"
+USER_NAME="${VERIFY_USER:-verify}"
+USER_PW="${VERIFY_PW:-Verify1234!}"
+
+PASS=0; FAIL=0
+pass() { PASS=$((PASS+1)); printf '\033[0;32m  PASS\033[0m %s\n' "$*"; }
+fail() { FAIL=$((FAIL+1)); printf '\033[0;31m  FAIL\033[0m %s\n' "$*"; }
+
+now_ms() { date +%s%3N; }
+secs()   { awk -v ms="$1" 'BEGIN{printf "%.1f", ms/1000}'; }
+
+# 프론트를 통해 호출합니다. Tomcat 을 직접 치지 않는 이유는, 프론트의
+# /api 프록시까지 한 번에 검증하기 위해서입니다(브라우저와 같은 경로).
+FRONT="http://127.0.0.1:${FRONTEND_PORT}"
+
+
+log "1. 프론트엔드"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$FRONT/")
+[ "$code" = "200" ] && pass "HTTP $code" || fail "HTTP $code (기대 200)"
+
+
+log "2. 인증"
+# 이미 있는 계정이면 400 이 정상입니다. 로그인 성공 여부로만 판정합니다.
+curl -s -o /dev/null -X POST "$FRONT/api/auth/signup" \
+    -H 'Content-Type: application/json' \
+    -d "{\"username\":\"${USER_NAME}\",\"password\":\"${USER_PW}\",\"age\":30}"
+
+TOKEN=$(curl -s -X POST "$FRONT/api/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "{\"username\":\"${USER_NAME}\",\"password\":\"${USER_PW}\"}" \
+    | python3 -c 'import sys,json
+try: print(json.load(sys.stdin)["token"])
+except Exception: print("")' 2>/dev/null)
+
+if [ -n "$TOKEN" ]; then
+    pass "로그인 · JWT 발급 (프록시 경유)"
+    AUTH_OK=1
+else
+    fail "로그인 실패 — Tomcat 또는 프록시 확인"
+    AUTH_OK=0
+fi
+
+
+log "3. 채팅 (콜드)"
+COLD_MS=0; WARM_MS=0; SRC_COUNT=0
+if [ "$AUTH_OK" = "1" ]; then
+    t0=$(now_ms)
+    body=$(curl -s -X POST "$FRONT/api/chat" \
+        -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+        -d '{"question":"전세 보증금을 돌려받지 못하면 어떻게 해야 하나요?","lawCategory":null,"sessionId":null}')
+    COLD_MS=$(( $(now_ms) - t0 ))
+
+    SRC_COUNT=$(printf '%s' "$body" | python3 -c 'import sys,json
+try:
+    d=json.load(sys.stdin); print(len(d.get("sources") or []))
+except Exception: print(-1)' 2>/dev/null)
+    ANSWER_LEN=$(printf '%s' "$body" | python3 -c 'import sys,json
+try:
+    d=json.load(sys.stdin); print(len(d.get("answer") or ""))
+except Exception: print(0)' 2>/dev/null)
+
+    if [ "${ANSWER_LEN:-0}" -gt 50 ]; then
+        pass "답변 생성 ($(secs "$COLD_MS")초, ${ANSWER_LEN}자)"
+    else
+        fail "답변 없음 ($(secs "$COLD_MS")초) — AI 서버 로그 확인: $LOG_DIR/ai.log"
+    fi
+
+    # 근거 문서가 0건이면 색인이 비었거나 벡터 검색이 죽은 것입니다.
+    # 응답 자체는 200 으로 오기 때문에 이 항목이 없으면 놓칩니다.
+    if [ "${SRC_COUNT:-0}" -gt 0 ]; then
+        pass "근거 문서 ${SRC_COUNT}건 (RAG 동작)"
+    else
+        fail "근거 문서 0건 — 색인 또는 k-NN 확인"
+    fi
+
+    log "4. 채팅 (워밍업 후)"
+    t0=$(now_ms)
+    curl -s -o /dev/null -X POST "$FRONT/api/chat" \
+        -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+        -d '{"question":"임대차 계약 갱신 거절 사유는?","lawCategory":null,"sessionId":null}'
+    WARM_MS=$(( $(now_ms) - t0 ))
+    # 백엔드의 FastAPI 호출 타임아웃이 180초라 그 아래여야 의미가 있습니다.
+    if [ "$WARM_MS" -lt 180000 ]; then
+        pass "응답 $(secs "$WARM_MS")초"
+    else
+        fail "응답 $(secs "$WARM_MS")초 — 백엔드 타임아웃(180초) 초과 위험"
+    fi
+else
+    fail "인증 실패로 채팅 검증 건너뜀"
+fi
+
+
+log "5. 데이터"
+load_opensearch_creds
+OS_DOCS=$(os_curl "$OS_BASE/${INDEX_NAME:-legal_documents}/_count" | grep -o '"count":[0-9]*' | cut -d: -f2)
+[ "${OS_DOCS:-0}" -gt 0 ] && pass "OpenSearch ${OS_DOCS}건" || fail "OpenSearch 색인 비어 있음"
+
+DB_USERS=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM users;" 2>/dev/null)
+DB_MSGS=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM chat_message;" 2>/dev/null)
+[ "${DB_MSGS:-0}" -gt 0 ] && pass "SQLite 사용자 ${DB_USERS} · 메시지 ${DB_MSGS}" \
+                          || fail "SQLite 에 메시지가 기록되지 않음"
+
+# 타임존 확인. UTC 로 기록되면 TZ 가 프로세스에 전달되지 않은 것입니다.
+LAST_TS=$(sqlite3 "$DB_PATH" "SELECT created_at FROM chat_message ORDER BY id DESC LIMIT 1;" 2>/dev/null)
+DB_HOUR=$(printf '%s' "$LAST_TS" | cut -d' ' -f2 | cut -d: -f1)
+UTC_HOUR=$(date -u +%H)
+if [ -n "$LAST_TS" ] && [ "$DB_HOUR" != "$UTC_HOUR" ]; then
+    pass "타임존 (마지막 기록 $LAST_TS)"
+else
+    fail "시각이 UTC 로 기록된 듯합니다 ($LAST_TS) — TZ=Asia/Seoul 확인"
+fi
+
+
+log "6. 로그 에러"
+errs=0
+for f in ai tomcat frontend; do
+    [ -f "$LOG_DIR/$f.log" ] || continue
+    n=$(grep -ciE "traceback|exception|error" "$LOG_DIR/$f.log" 2>/dev/null)
+    [ "${n:-0}" -gt 0 ] && { warn "$f.log 에 에러 흔적 ${n}건"; errs=$((errs+n)); }
+done
+[ "$errs" -eq 0 ] && pass "에러 없음" || warn "총 ${errs}건 — 치명적 여부는 직접 확인하세요"
+
+
+# -----------------------------------------------------------
+# 결과 누적
+# -----------------------------------------------------------
+[ -f "$RESULTS" ] || echo "timestamp,form,pass,fail,cold_sec,warm_sec,sources,os_docs,db_msgs,result" > "$RESULTS"
+VERDICT=$([ "$FAIL" -eq 0 ] && echo PASS || echo FAIL)
+echo "$(date '+%Y-%m-%d %H:%M:%S'),${FORM},${PASS},${FAIL},$(secs "$COLD_MS"),$(secs "$WARM_MS"),${SRC_COUNT},${OS_DOCS:-0},${DB_MSGS:-0},${VERDICT}" >> "$RESULTS"
+
+echo
+log "결과: ${PASS} PASS / ${FAIL} FAIL → ${VERDICT}"
+echo "  누적 기록: $RESULTS"
+column -s, -t "$RESULTS" 2>/dev/null | tail -5
+
+[ "$FAIL" -eq 0 ]
