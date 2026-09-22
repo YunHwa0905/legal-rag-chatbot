@@ -31,6 +31,12 @@ RUN --mount=type=cache,target=/root/.m2 \
 # -----------------------------------------------------------
 FROM tomcat:9.0-jdk11-temurin
 
+# sqlite3 CLI — DB 파일이 없을 때 entrypoint 가 스키마를 적용하는 데 씁니다.
+# (MySQL 컨테이너가 init.sql 을 자동 실행해주던 역할을 대신합니다)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends sqlite3 \
+ && rm -rf /var/lib/apt/lists/*
+
 # 한글 요청/응답 인코딩
 ENV CATALINA_OPTS="-Dfile.encoding=UTF-8 -Duser.timezone=Asia/Seoul"
 

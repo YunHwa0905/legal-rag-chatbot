@@ -13,15 +13,15 @@
 # ★ DB 가 MySQL 에서 SQLite 로 바뀌면서 달라진 점:
 #   - DB_USERNAME / DB_PASSWORD 가 없습니다. 파일 권한이 곧 접근 제어입니다.
 #   - DB_URL 대신 DB_PATH(파일 경로)를 받습니다.
-#   - 스키마가 자동 생성되지 않습니다. MySQL 은 컨테이너가 처음 뜰 때
-#     init.sql 을 실행해줬지만 SQLite 에는 그런 장치가 없어서,
-#     deploy/schema.sqlite.sql 을 미리 적용해 둔 파일이 필요합니다.
+#   - DB 파일이 없으면 마운트된 스키마로 직접 만듭니다. MySQL 컨테이너가
+#     첫 기동에 init.sql 을 실행해주던 역할을 여기서 대신합니다.
 # ===========================================================
 
 set -e
 
 PROPS="${CATALINA_HOME}/webapps/ROOT/WEB-INF/classes/db.properties"
 DB_PATH="${DB_PATH:-/var/lib/lexai/lexai.db}"
+SCHEMA_FILE="${SCHEMA_FILE:-/opt/schema.sqlite.sql}"
 
 # -----------------------------------------------------------
 # 필수 환경변수 검증
@@ -52,10 +52,17 @@ fi
 mkdir -p "$(dirname "$DB_PATH")"
 
 if [ ! -f "$DB_PATH" ]; then
-    echo "[FATAL] DB 파일이 없습니다: ${DB_PATH}" >&2
-    echo "[FATAL] 스키마를 먼저 적용하세요:" >&2
-    echo "[FATAL]   sqlite3 ${DB_PATH} < deploy/schema.sqlite.sql" >&2
-    exit 1
+    if [ -f "$SCHEMA_FILE" ]; then
+        echo "[INFO] DB 파일이 없어 스키마를 적용합니다: ${DB_PATH}"
+        sqlite3 "$DB_PATH" < "$SCHEMA_FILE" > /dev/null
+        echo "[INFO] 스키마 적용 완료 (테이블 $(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")개)"
+    else
+        echo "[FATAL] DB 파일도 스키마 파일도 없습니다." >&2
+        echo "[FATAL]   DB     : ${DB_PATH}" >&2
+        echo "[FATAL]   스키마 : ${SCHEMA_FILE}" >&2
+        echo "[FATAL] compose 의 볼륨 마운트를 확인하세요." >&2
+        exit 1
+    fi
 fi
 
 if [ ! -w "$DB_PATH" ]; then
@@ -86,8 +93,6 @@ cat > "$PROPS" <<EOF
 db.driver.Class=org.sqlite.JDBC
 db.url=jdbc:sqlite:${DB_PATH}
 fastapi.url=${FASTAPI_URL:-http://ai:8000}
-redis.host=${REDIS_HOST:-redis}
-redis.port=${REDIS_PORT:-6379}
 jwt.secret=${JWT_SECRET}
 jwt.expiration=${JWT_EXPIRATION:-86400000}
 EOF
@@ -98,7 +103,6 @@ echo "[INFO] db.properties 생성 완료"
 echo "[INFO]   db.url      = jdbc:sqlite:${DB_PATH}"
 echo "[INFO]   db 파일 크기 = $(wc -c < "$DB_PATH") bytes"
 echo "[INFO]   fastapi.url = ${FASTAPI_URL:-http://ai:8000}"
-echo "[INFO]   redis       = ${REDIS_HOST:-redis}:${REDIS_PORT:-6379} (선택적 — 없어도 기능은 동작)"
 echo "[INFO]   TZ          = ${TZ:-(미설정 — UTC)}"
 echo "[INFO]   CORS origin = ${CORS_ALLOWED_ORIGIN:-(없음 — 동일 오리진)}"
 

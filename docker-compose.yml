@@ -1,55 +1,48 @@
 # ===========================================================
 # LexAI 배포 구성
 #
-#   [브라우저] → caddy(80/443) ─┬→ frontend (Express, 정적 3페이지)
-#                               └→ /api/* → tomcat (Spring Legacy WAR)
-#                                              └→ ai (FastAPI)
-#                                                   ├→ opensearch (BM25 + kNN)
-#                                                   └→ ollama (Gemma 3 4B, GPU)
-#                                  tomcat → mysql (사용자 정보)
+#   [브라우저] → frontend(80) ─┬→ 정적 3페이지 (Express)
+#                              └→ /api/* → tomcat (Spring Legacy WAR)
+#                                             ├→ ai (FastAPI)
+#                                             │    ├→ opensearch (BM25 + kNN)
+#                                             │    └→ ollama (Gemma 3 4B, GPU)
+#                                             └→ SQLite 파일 (사용자·대화)
 #
-# 외부에 열리는 포트는 caddy 의 80/443 뿐입니다.
-# 9200(OpenSearch) / 11434(Ollama) / 3306(MySQL) 은 내부 네트워크에만 존재합니다.
+# 외부에 열리는 포트는 frontend 의 80 뿐입니다.
+# 9200(OpenSearch) / 11434(Ollama) 는 내부 네트워크에만 존재합니다.
+#
+# ★ 2026-09 CSP 이관 검증에 맞춰 구성을 줄였습니다.
+#   - MySQL  → SQLite 파일 (관리형 DB 를 함께 옮길 필요가 없어집니다)
+#   - Redis  → 비활성화    (원래도 없어도 되는 읽기 캐시였습니다)
+#   - Caddy  → 제거        (frontend 의 server.js 가 /api 를 프록시합니다)
+#
+#   HTTPS 가 필요해지면 CSP 의 로드밸런서에서 종료하는 쪽을 권합니다.
+#   Caddy 를 되살리려면 git 이력의 이전 버전을 참고하세요.
 # ===========================================================
 
 services:
 
   # ---------------------------------------------------------
-  # 리버스 프록시 — 단일 오리진 + HTTPS 자동 발급
-  # ---------------------------------------------------------
-  caddy:
-    image: caddy:2-alpine
-    container_name: lexai-caddy
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"      # HTTP/3
-    environment:
-      # .env 의 SITE_ADDRESS 를 Caddyfile 이 그대로 사용합니다.
-      #   :80              → HTTP (도메인 없을 때)
-      #   lexai.duckdns.org → HTTPS 자동 발급
-      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data          # 발급받은 인증서 — 반드시 볼륨 (지우면 재발급 rate limit 걸림)
-      - caddy_config:/config
-    depends_on:
-      - frontend
-      - tomcat
-
-  # ---------------------------------------------------------
-  # 프론트엔드 — Express 정적 서버
+  # 프론트엔드 — 정적 파일 + /api 리버스 프록시
+  #
+  #   Caddy 를 걷어내면서 외부 진입점이 이 서비스가 됐습니다. 화면의
+  #   스크립트가 /api 를 상대경로로 호출하므로 프론트와 API 가 같은
+  #   오리진이 되어 CORS 가 필요 없습니다 — 프록시를 여기서 처리하는
+  #   이유가 그것입니다(server.js 참고).
   # ---------------------------------------------------------
   frontend:
     build:
       context: ./frontend
     container_name: lexai-frontend
     restart: unless-stopped
+    ports:
+      - "80:3000"
     environment:
       PORT: 3000
-    expose:
-      - "3000"
+      BACKEND_URL: ${BACKEND_URL:-http://tomcat:8080}
+    depends_on:
+      tomcat:
+        condition: service_started
 
   # ---------------------------------------------------------
   # 백엔드 — Spring Legacy WAR (Tomcat 9 / Java 11)
@@ -62,23 +55,26 @@ services:
     container_name: lexai-tomcat
     restart: unless-stopped
     environment:
-      DB_URL: ${DB_URL}
-      DB_USERNAME: ${DB_USERNAME}
-      DB_PASSWORD: ${DB_PASSWORD}
+      # DB 는 파일 하나입니다. 아래 경로에 볼륨을 마운트해 두었습니다.
+      DB_PATH: ${DB_PATH:-/var/lib/lexai/lexai.db}
+      # ★ SQLite 가 시각을 datetime('now','localtime') 으로 기록하는데,
+      #   이 localtime 은 JVM 설정이 아니라 컨테이너의 OS 타임존을 따릅니다.
+      #   없으면 UTC 로 기록되어 9시간 어긋납니다.
+      TZ: ${TZ:-Asia/Seoul}
       JWT_SECRET: ${JWT_SECRET}
       JWT_EXPIRATION: ${JWT_EXPIRATION:-86400000}
       FASTAPI_URL: ${FASTAPI_URL:-http://ai:8000}
-      REDIS_HOST: ${REDIS_HOST:-redis}
-      REDIS_PORT: ${REDIS_PORT:-6379}
       CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:-}
+    volumes:
+      # 사용자·대화 데이터. 이 볼륨 하나가 예전 mysql_data 를 대신합니다.
+      - lexai_data:/var/lib/lexai
+      # 최초 기동 시 entrypoint 가 이 파일로 스키마를 만듭니다
+      # (MySQL 컨테이너의 init.sql 이 하던 역할).
+      - ./deploy/schema.sqlite.sql:/opt/schema.sqlite.sql:ro
     expose:
       - "8080"
     depends_on:
-      mysql:
-        condition: service_healthy
       ai:
-        condition: service_started
-      redis:
         condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
@@ -256,66 +252,30 @@ services:
       start_period: 90s
 
   # ---------------------------------------------------------
-  # 읽기 캐시 (Phase 1.5) — 세션 목록·대화 컨텍스트만 캐싱.
-  # 데이터 유실을 걱정할 필요 없는 순수 캐시라 명시적 볼륨을 안 둔다.
+  # 제거된 서비스 — mysql, redis, caddy
   #
-  # ★ command로 영속화(RDB 스냅샷/AOF)를 껐다 — redis 공식 이미지는 기본 설정으로
-  #   돌리면 VOLUME /data가 선언돼 있어 익명 볼륨이 자동 생성되고, 기본 save
-  #   포인트(3600 1 / 300 100 / 60 10000)가 켜져 있어 대화 내용이 dump.rdb로
-  #   디스크에 그대로 스냅샷된다 — "컨테이너 재시작 = 캐시 전체 미스"가 실제로는
-  #   아니었다(최종 리뷰 I4). --save ""로 스냅샷을 끄고 --appendonly no로 AOF도
-  #   끄면 앞의 주석이 실제로 사실이 된다. maxmemory/eviction도 함께 둔다 —
-  #   TTL(5분)만으로는 폭주하는 동시 세션 수에 대한 메모리 상한이 없었다.
+  #   CSP 간 이관에서 함께 옮겨야 할 것을 줄이려고 걷어냈습니다.
+  #   기능은 그대로이며, 각 단계마다 합격 기준을 다시 통과시켰습니다.
+  #
+  #   mysql → SQLite 파일 (tomcat 의 lexai_data 볼륨)
+  #           덤프/복원이 파일 복사가 됩니다.
+  #   redis → 비활성화 (root-context.xml 의 빈 3개를 주석 처리)
+  #           원래도 순수 읽기 캐시라 없으면 캐시 미스가 될 뿐입니다.
+  #   caddy → frontend 의 server.js 가 /api 를 프록시합니다.
+  #           HTTPS 가 필요해지면 CSP 로드밸런서에서 종료하세요.
+  #
+  #   되살리려면 git 이력의 이전 버전을 참고하세요.
   # ---------------------------------------------------------
-  redis:
-    image: redis:7-alpine
-    container_name: lexai-redis
-    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
-    restart: unless-stopped
-    expose:
-      - "6379"
-
-  # ---------------------------------------------------------
-  # RDB — MySQL 8 (사용자 정보)
-  # ---------------------------------------------------------
-  mysql:
-    image: mysql:8.0
-    container_name: lexai-mysql
-    restart: unless-stopped
-    command:
-      - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_unicode_ci
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-legal_chatbot}
-      MYSQL_USER: ${DB_USERNAME}
-      MYSQL_PASSWORD: ${DB_PASSWORD}
-      TZ: Asia/Seoul
-    volumes:
-      - mysql_data:/var/lib/mysql
-      # 최초 기동 시 1회만 실행됩니다 (mysql_data 가 비어 있을 때).
-      - ./deploy/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
-    expose:
-      - "3306"
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$${MYSQL_ROOT_PASSWORD} --silent || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-      start_period: 40s
-
 
 # ===========================================================
 # 볼륨 — 재기동/재빌드해도 살아남아야 하는 데이터
 #
-# ★ 주의: g4dn 인스턴스의 125GB NVMe 는 임시 스토리지라
-#         stop/start 시 삭제됩니다. 이 볼륨들은 도커 기본 위치
+# ★ 주의: g4dn 인스턴스의 NVMe 는 임시 스토리지라 stop/start 시
+#         삭제됩니다. 이 볼륨들은 도커 기본 위치
 #         (/var/lib/docker/volumes → 루트 EBS) 에 있어야 안전합니다.
 # ===========================================================
 volumes:
-  mysql_data:
-  opensearch_data:
-  ollama_models:
-  hf_cache:
-  caddy_data:
-  caddy_config:
+  lexai_data:        # SQLite DB — 사용자·대화 (예전 mysql_data)
+  opensearch_data:   # 색인 253,207건 — 이관 시 스냅샷으로 옮깁니다
+  ollama_models:     # LLM 5GB — 이관 불필요(대상에서 자동 다운로드)
+  hf_cache:          # 임베딩 모델 450MB — 이관 불필요
