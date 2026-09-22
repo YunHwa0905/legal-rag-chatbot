@@ -25,18 +25,24 @@
 #
 #   IMAGE_TAG 는 고정 태그를 쓰세요. latest 는 어느 이미지가 떴는지
 #   추적이 안 돼서 이관 검증에 부적합합니다.
+#
+#   태그 이력
+#     v1  MySQL + Caddy 구성 (2026-09-21)
+#     v2  SQLite 전환 · Caddy 제거 · Redis 비활성화 (2026-09-22)
+#
+#   v1 을 지우지 않고 남겨두면 문제가 생겼을 때 되돌릴 수 있습니다.
 # ===========================================================
 
 services:
 
   frontend:
-    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-frontend:${IMAGE_TAG:-v1}
+    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-frontend:${IMAGE_TAG:-v2}
     build: !reset null
 
   tomcat:
-    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-tomcat:${IMAGE_TAG:-v1}
+    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-tomcat:${IMAGE_TAG:-v2}
     build: !reset null
 
   ai:
-    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-ai:${IMAGE_TAG:-v1}
+    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-ai:${IMAGE_TAG:-v2}
     build: !reset null
