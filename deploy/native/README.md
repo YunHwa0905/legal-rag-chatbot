@@ -17,7 +17,43 @@ Docker Compose 구성(`docker-compose.yml`)과 같은 저장소를 공유합니�
 | LLM | Ollama 컨테이너 | Ollama systemd 서비스 |
 | 앱 | 컨테이너 3개 | 호스트 프로세스 3개 |
 
-## 사용
+## 새 환경에 올릴 때 — 한 줄
+
+사람이 하는 일은 **VM 생성과 SSH 접속까지**입니다. 그 뒤는 이 한 줄이
+코드 확보 · 시크릿 발급 · GPU 드라이버 · 설치 · 데이터 복원 · 기동 · 검증을
+무인으로 수행합니다.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/YunHwa0905/legal-rag-chatbot/feat/sqlite/deploy/native/bootstrap.sh | bash
+```
+
+이관 패키지가 오브젝트 스토리지에 있으면 위치를 알려주세요. 색인과 DB 까지
+받아서 복원합니다.
+
+```bash
+curl -fsSL <위 주소> | SNAPSHOT_URI=s3://버킷/lexai/20260922-1530 bash
+```
+
+드라이버가 없는 인스턴스라면 설치 후 **스스로 재부팅하고, 부팅이 끝나면
+같은 지점부터 자동으로 이어서 진행합니다.** 재접속해서 명령을 다시 칠
+필요가 없고, 진행 상황은 이렇게 봅니다.
+
+```bash
+journalctl -u lexai-bootstrap-resume -f
+```
+
+| 환경변수 | 기본값 | 용도 |
+| --- | --- | --- |
+| `BRANCH` | `feat/sqlite` | 받을 브랜치 |
+| `SNAPSHOT_URI` | — | 이관 패키지 위치 (`s3://` · `gs://` · `https://`) |
+| `SKIP_DRIVER=1` | — | GPU 이미지를 쓰는 경우 드라이버 설치 생략 |
+| `NO_START=1` | — | 준비만 하고 기동은 하지 않음 |
+
+시크릿(`JWT_SECRET` · `OPENSEARCH_PASSWORD`)은 자동 발급되어 `.env` 에 들어가고,
+사본이 `~/.lexai-secrets` 에 남습니다. **이관 시 대상 환경에 같은 값을 넣어야**
+기존 색인에 접속할 수 있습니다.
+
+## 이미 올라간 환경에서
 
 평소에는 이 두 개만 쓰면 됩니다.
 
@@ -43,6 +79,7 @@ bash deploy/native/restore.sh    # 스키마·모델·색인 준비
 bash deploy/native/start.sh      # 기동
 bash deploy/native/verify.sh     # 합격 기준 판정
 bash deploy/native/backup.sh     # 이관 패키지 생성
+bash deploy/native/bootstrap.sh  # 위 전체를 새 환경에서 한 번에 (보통 curl 로 실행)
 ```
 
 개별 대상만 다루려면 인자를 주세요.
