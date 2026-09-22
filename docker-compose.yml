@@ -230,8 +230,14 @@ services:
       - OPENSEARCH_JAVA_OPTS=-Xms${OPENSEARCH_HEAP:-2g} -Xmx${OPENSEARCH_HEAP:-2g}
       # 2.12 부터 필수. 없으면 부팅 실패합니다.
       - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_PASSWORD}
-      # 스냅샷 복원용 경로 등록 (학교에서 가져온 인덱스를 restore 할 때 사용)
+      # 스냅샷 복원용 경로 등록 — 이관 시 색인을 여기로 넣습니다.
       - path.repo=/mnt/snapshots
+      # ★ 보안 플러그인이 기본적으로 스냅샷 복원을 막습니다. 없으면 복원이
+      #   403 no permissions for [] 로 거부되는데, 권한 부족이 아니라
+      #   복원 게이트라서 메시지만 보고는 원인을 찾기 어렵습니다.
+      #   (네이티브 설치에서 실제로 겪은 문제라 여기도 명시해 둡니다)
+      - plugins.security.enable_snapshot_restore_privilege=true
+      - plugins.security.check_snapshot_restore_write_privileges=false
     ulimits:
       memlock:
         soft: -1
