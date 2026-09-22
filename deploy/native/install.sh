@@ -31,10 +31,17 @@ if ! command -v node >/dev/null 2>&1; then
     curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
     sudo apt-get install -y nodejs
 fi
-ok "sqlite3 $(sqlite3 --version | cut -d' ' -f1) / node $(node --version) / $(java -version 2>&1 | head -1)"
+ok "sqlite3 $(sqlite3 --version | cut -d' ' -f1) / node $(node --version) / maven $(mvn -v 2>/dev/null | head -1 | cut -d' ' -f3)"
 
+# 호스트에 여러 JDK 가 깔려 있을 수 있습니다(DLAMI 는 21 이 기본).
+# Tomcat 은 JDK 11 로 빌드/기동해야 하므로 경로 존재를 따로 확인합니다.
 JAVA11_HOME="/usr/lib/jvm/java-11-openjdk-amd64"
-[ -d "$JAVA11_HOME" ] || warn "JDK 11 경로를 찾지 못했습니다: $JAVA11_HOME (Tomcat 기동 시 JAVA_HOME 확인 필요)"
+if [ -d "$JAVA11_HOME" ]; then
+    ok "JDK 11 $("$JAVA11_HOME/bin/java" -version 2>&1 | head -1 | cut -d'"' -f2) (Tomcat 용)"
+else
+    warn "JDK 11 경로를 찾지 못했습니다: $JAVA11_HOME"
+    warn "Tomcat 기동 시 JAVA_HOME 을 직접 지정해야 합니다"
+fi
 
 
 log "2. 커널 파라미터"

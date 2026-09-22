@@ -134,7 +134,10 @@ log "6. 로그 에러"
 errs=0
 for f in ai tomcat frontend; do
     [ -f "$LOG_DIR/$f.log" ] || continue
-    n=$(grep -ciE "traceback|exception|error" "$LOG_DIR/$f.log" 2>/dev/null)
+    # DEBUG 로그에 error='null' 같은 문자열이 흔해서 단순 grep 은 오탐이 심합니다
+    # (Lettuce/MyBatis 디버그 출력만으로 수십 건이 잡힙니다).
+    # 실제 문제를 나타내는 패턴만 셉니다.
+    n=$(grep -cE "Traceback \(most recent|^Caused by:|Exception in thread|ERROR|SEVERE" "$LOG_DIR/$f.log" 2>/dev/null)
     [ "${n:-0}" -gt 0 ] && { warn "$f.log 에 에러 흔적 ${n}건"; errs=$((errs+n)); }
 done
 [ "$errs" -eq 0 ] && pass "에러 없음" || warn "총 ${errs}건 — 치명적 여부는 직접 확인하세요"

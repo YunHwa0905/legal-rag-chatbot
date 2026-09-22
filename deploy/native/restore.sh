@@ -24,7 +24,8 @@ REWRITE_MODEL="${OLLAMA_REWRITE_MODEL:-gemma3:1b}"
 log "1. SQLite 스키마"
 # -----------------------------------------------------------
 mkdir -p "$(dirname "$DB_PATH")"
-sqlite3 "$DB_PATH" < "$REPO_DIR/deploy/schema.sqlite.sql"
+# PRAGMA journal_mode 문이 결과값을 출력하므로 조용히 적용합니다.
+sqlite3 "$DB_PATH" < "$REPO_DIR/deploy/schema.sqlite.sql" > /dev/null
 
 tables=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
 triggers=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger';")
