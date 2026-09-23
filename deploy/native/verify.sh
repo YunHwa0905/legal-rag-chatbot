@@ -26,6 +26,10 @@ USER_PW="${VERIFY_PW:-Verify1234!}"
 # 계약이 요구하는 p50/p95 를 내려면 반복이 필요합니다.
 RUNS="${RUNS:-1}"
 
+# 이관 없이 기동만 검증할 때는 색인이 비어 있는 게 정상입니다.
+# 근거 문서 0건을 FAIL 이 아니라 WARN 으로 처리합니다 (restore.sh 와 같은 플래그).
+ALLOW_EMPTY_INDEX="${ALLOW_EMPTY_INDEX:-0}"
+
 PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); printf '\033[0;32m  PASS\033[0m %s\n' "$*"; }
 fail() { FAIL=$((FAIL+1)); printf '\033[0;31m  FAIL\033[0m %s\n' "$*"; }
@@ -106,6 +110,8 @@ except Exception: print(0)' 2>/dev/null)
     # 응답 자체는 200 으로 오기 때문에 이 항목이 없으면 놓칩니다.
     if [ "${SRC_COUNT:-0}" -gt 0 ]; then
         pass "근거 문서 ${SRC_COUNT}건 (RAG 동작)"
+    elif [ "$ALLOW_EMPTY_INDEX" = "1" ]; then
+        warn "근거 문서 0건 — 빈 색인이라 예상된 결과입니다 (ALLOW_EMPTY_INDEX=1)"
     else
         fail "근거 문서 0건 — 색인 또는 k-NN 확인"
     fi
@@ -145,7 +151,19 @@ fi
 log "5. 데이터"
 load_opensearch_creds
 OS_DOCS=$(os_curl "$OS_BASE/${INDEX_NAME:-legal_documents}/_count" | grep -o '"count":[0-9]*' | cut -d: -f2)
-[ "${OS_DOCS:-0}" -gt 0 ] && pass "OpenSearch ${OS_DOCS}건" || fail "OpenSearch 색인 비어 있음"
+if [ "${OS_DOCS:-0}" -gt 0 ]; then
+    pass "OpenSearch ${OS_DOCS}건"
+elif [ "$ALLOW_EMPTY_INDEX" = "1" ]; then
+    # 색인이 "비어 있음"과 "아예 없음"은 다릅니다. 매핑까지 확인해야
+    # 빈 색인이 제대로 만들어졌는지 알 수 있습니다.
+    if os_curl -o /dev/null -w '%{http_code}' "$OS_BASE/${INDEX_NAME:-legal_documents}" | grep -q 200; then
+        warn "OpenSearch 0건 — 빈 색인이라 예상된 결과입니다 (매핑은 존재)"
+    else
+        fail "색인이 아예 없습니다 — 빈 색인 생성이 실패한 상태입니다"
+    fi
+else
+    fail "OpenSearch 색인 비어 있음"
+fi
 
 DB_USERS=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM users;" 2>/dev/null)
 DB_MSGS=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM chat_message;" 2>/dev/null)

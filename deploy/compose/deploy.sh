@@ -523,8 +523,16 @@ count=$( { os "$OS_BASE/${INDEX_NAME}/_count" | grep -o '"count":[0-9]*' | cut -
 if [ -n "${count:-}" ] && [ "${count:-0}" -gt 0 ] 2>/dev/null; then
     ok "색인이 이미 있습니다 (${count}건) — 복원 건너뜀"
 elif [ -z "$(ls -A "$DEPLOY_DIR/deploy/snapshots" 2>/dev/null)" ]; then
-    warn "색인도 스냅샷도 없습니다 — 서비스는 뜨지만 답변에 근거 문서가 붙지 않습니다"
-    warn "  SNAPSHOT_URI 를 주고 다시 실행하세요"
+    # 이관 없이 기동만 검증하는 경우입니다. 색인이 아예 없으면 검색이 404 로
+    # 떨어져 채팅이 에러가 나므로, 매핑만 갖춘 빈 색인을 만들어 둡니다 —
+    # 서비스는 정상 동작하고 근거 문서만 0건이 됩니다.
+    warn "스냅샷이 없습니다 — 빈 색인으로 진행합니다 (기동 검증 전용)"
+    if compose exec -T ai python -m indexing.index_builder; then
+        ok "빈 색인 생성 (매핑만)"
+    else
+        warn "빈 색인 생성 실패 — 채팅이 에러가 날 수 있습니다 (docker compose logs ai)"
+    fi
+    warn "이관 검증까지 하려면 SNAPSHOT_URI 를 주고 다시 실행하세요"
 else
     os -X PUT "$OS_BASE/_snapshot/${SNAPSHOT_REPO}" \
         -H 'Content-Type: application/json' \

@@ -90,11 +90,32 @@ count=$(os_curl "$OS_BASE/${INDEX_NAME}/_count" | grep -o '"count":[0-9]*' | cut
 if [ -n "${count:-}" ] && [ "$count" -gt 0 ] 2>/dev/null; then
     ok "색인이 이미 있습니다 (${count}건) — 복원 건너뜀"
 else
-    # 스냅샷 파일 확인. 없으면 여기서 멈춰야 합니다 — 복원 없이 서비스를
-    # 띄우면 컨테이너는 다 정상인데 답변만 근거 없이 나오는 상태가 됩니다.
+    # 스냅샷 파일 확인. 없으면 기본적으로 여기서 멈춥니다 — 복원 없이 띄우면
+    # 프로세스는 다 정상인데 답변만 근거 없이 나오는 상태가 되고, 그게 가장
+    # 늦게 발견되는 실패 방식입니다.
+    #
+    # 다만 이관 없이 "백지 VM 에서 기동만 되는지" 를 볼 때는 패키지가 없는 게
+    # 정상입니다. 그 경우에는 ALLOW_EMPTY_INDEX=1 로 명시적으로 허용하세요.
     if [ -z "$(ls -A "$SNAPSHOT_DIR" 2>/dev/null | grep -v '^\.gitkeep$')" ]; then
-        die "스냅샷이 없습니다: $SNAPSHOT_DIR (backup.sh 산출물을 여기에 풀어두세요)"
-    fi
+        [ "${ALLOW_EMPTY_INDEX:-0}" = "1" ] || die "스냅샷이 없습니다: $SNAPSHOT_DIR
+  이관 패키지를 여기에 풀어두거나, 기동 검증만 하려면 ALLOW_EMPTY_INDEX=1 을 주세요"
+
+        # 색인이 아예 없으면 검색이 404 로 떨어져 채팅이 에러가 납니다.
+        # 매핑만 갖춘 빈 색인을 만들어 두면 서비스는 정상 동작하고 근거 문서만
+        # 0건이 됩니다 — 기동 경로와 데이터 문제를 분리해서 볼 수 있습니다.
+        warn "스냅샷이 없어 빈 색인으로 진행합니다 (ALLOW_EMPTY_INDEX=1)"
+        warn "답변에 근거 문서가 붙지 않습니다 — 기동 검증 전용입니다"
+
+        # pydantic-settings 의 env_file 은 cwd 기준이라 ai/.env 를 찾습니다.
+        # 실제 값은 systemd 와 마찬가지로 환경변수로 넘깁니다.
+        ( cd "$REPO_DIR/ai" && \
+          OPENSEARCH_HOST=127.0.0.1 OPENSEARCH_PORT="$OPENSEARCH_PORT" \
+          OPENSEARCH_USE_SSL=true OPENSEARCH_INDEX="$INDEX_NAME" \
+          "$REPO_DIR/ai/.venv/bin/python" -m indexing.index_builder ) \
+            || die "빈 색인 생성 실패"
+        ok "빈 색인 생성 (매핑만)"
+        EMPTY_INDEX=1
+    else
 
     # 네이티브 OpenSearch 는 ubuntu 로 돌므로 소유권을 맞춥니다.
     # 컨테이너에서 뜬 스냅샷은 uid 1000 이라 대개 그대로 맞지만,
@@ -138,14 +159,20 @@ else
     count=$(os_curl "$OS_BASE/${INDEX_NAME}/_count" | grep -o '"count":[0-9]*' | cut -d: -f2)
     [ "${count:-0}" -gt 0 ] || die "복원 후에도 색인이 비어 있습니다"
     ok "복원 완료 — ${count}건 (${elapsed}초)"
+    fi
 fi
 
 # 벡터 필드까지 온전한지 확인합니다. 매핑이 깨지면 BM25 는 되는데
 # kNN 만 실패하는 상태가 되어 증상이 늦게 드러납니다.
-dim=$(os_curl "$OS_BASE/${INDEX_NAME}/_search?size=1" \
-    | python3 -c "import sys,json;h=json.load(sys.stdin)['hits']['hits'];print(len(h[0]['_source'].get('embedding',[])) if h else 0)" 2>/dev/null || echo 0)
-[ "$dim" -eq 768 ] || warn "임베딩 차원이 768 이 아닙니다: $dim"
-ok "임베딩 차원 ${dim}"
+# (빈 색인은 문서가 없어 확인할 값이 없으므로 건너뜁니다)
+if [ "${EMPTY_INDEX:-0}" = "1" ]; then
+    warn "빈 색인이라 임베딩 차원 확인을 건너뜁니다"
+else
+    dim=$(os_curl "$OS_BASE/${INDEX_NAME}/_search?size=1" \
+        | python3 -c "import sys,json;h=json.load(sys.stdin)['hits']['hits'];print(len(h[0]['_source'].get('embedding',[])) if h else 0)" 2>/dev/null || echo 0)
+    [ "$dim" -eq 768 ] || warn "임베딩 차원이 768 이 아닙니다: $dim"
+    ok "임베딩 차원 ${dim}"
+fi
 
 
 echo
