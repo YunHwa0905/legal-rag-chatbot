@@ -127,8 +127,9 @@ if [ "$(id -u)" -eq 0 ] && [ "${LEXAI_REEXEC:-0}" != "1" ]; then
     if [ "$RESUME" = "1" ]; then _args+=(--resume); fi
     if [ "$NO_START" = "1" ]; then _args+=(--no-start); fi
 
+    # 바로 위에서 사본을 새로 받았으므로 아래 0절의 갱신·재실행은 건너뜁니다.
     exec sudo -u "$_user" -H env \
-        LEXAI_REEXEC=1 \
+        LEXAI_REEXEC=1 LEXAI_FROMFILE=1 \
         BRANCH="$BRANCH" DEPLOY_DIR="$_dir" \
         REGISTRY_PREFIX="$REGISTRY_PREFIX" IMAGE_TAG="$IMAGE_TAG" \
         SNAPSHOT_URI="${SNAPSHOT_URI:-}" SKIP_DRIVER="${SKIP_DRIVER:-0}" \
@@ -137,22 +138,10 @@ fi
 
 
 # -----------------------------------------------------------
-# 1. 기본 도구
-# -----------------------------------------------------------
-log "1. 기본 도구"
-need=""
-for c in curl openssl; do command -v "$c" >/dev/null 2>&1 || need="$need $c"; done
-if [ -n "$need" ]; then
-    sudo apt-get update -qq
-    sudo apt-get install -y curl openssl ca-certificates
-fi
-
-mkdir -p "$DEPLOY_DIR"
-
-ok "배포 디렉터리: $DEPLOY_DIR"
-
-# -----------------------------------------------------------
-# ★ 사본 갱신 후 파일에서 다시 실행
+# 0. 사본 갱신 후 파일에서 다시 실행
+#
+# 본 작업을 시작하기 전에 끝내야 합니다. 뒤에 두면 아래 1절이 두 번
+# 출력됩니다(갈아타면서 처음부터 다시 도니까요).
 #
 # 두 가지를 동시에 해결합니다.
 #
@@ -173,6 +162,12 @@ ok "배포 디렉터리: $DEPLOY_DIR"
 # 깨집니다.
 # -----------------------------------------------------------
 if [ "${LEXAI_FROMFILE:-0}" != "1" ]; then
+    if ! command -v curl >/dev/null 2>&1; then
+        sudo apt-get update -qq
+        sudo apt-get install -y curl ca-certificates
+    fi
+    mkdir -p "$DEPLOY_DIR"
+
     if curl -fsSL "$SELF_URL" -o "$DEPLOY_DIR/.deploy.sh.new"; then
         mv "$DEPLOY_DIR/.deploy.sh.new" "$DEPLOY_DIR/deploy.sh"
         chmod +x "$DEPLOY_DIR/deploy.sh"
@@ -187,6 +182,19 @@ if [ "${LEXAI_FROMFILE:-0}" != "1" ]; then
     export SNAPSHOT_URI="${SNAPSHOT_URI:-}" SKIP_DRIVER="${SKIP_DRIVER:-0}"
     exec bash "$DEPLOY_DIR/deploy.sh" "${@:-}" </dev/null
 fi
+
+
+# -----------------------------------------------------------
+# 1. 기본 도구
+# -----------------------------------------------------------
+log "1. 기본 도구"
+need=""
+for c in curl openssl; do command -v "$c" >/dev/null 2>&1 || need="$need $c"; done
+if [ -n "$need" ]; then
+    sudo apt-get update -qq
+    sudo apt-get install -y curl openssl ca-certificates
+fi
+ok "배포 디렉터리: $DEPLOY_DIR"
 
 
 # -----------------------------------------------------------
