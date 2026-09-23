@@ -20,12 +20,13 @@ OPENSEARCH_HEAP="${OPENSEARCH_HEAP:-2g}"
 log "1. 런타임 패키지"
 # -----------------------------------------------------------
 missing=""
-for pkg in sqlite3 mvn java; do
+for pkg in sqlite3 mvn java pigz; do
     command -v "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"
 done
 if [ -n "$missing" ]; then
     sudo apt-get update -qq
-    sudo apt-get install -y sqlite3 openjdk-11-jdk maven
+    # pigz — 이관 패키지 압축을 코어 수만큼 병렬로 돌립니다
+    sudo apt-get install -y sqlite3 openjdk-11-jdk maven pigz
 fi
 if ! command -v node >/dev/null 2>&1; then
     curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -

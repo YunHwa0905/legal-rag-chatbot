@@ -52,9 +52,36 @@ log "   파일 목록 생성"
 write_manifest "$SNAPSHOT_DIR"
 ok "$(wc -l < "$SNAPSHOT_DIR/$MANIFEST_NAME")개 파일"
 
+# -----------------------------------------------------------
+# 패키징
+#
+# gzip 은 단일 코어만 씁니다. 스냅샷이 수 GB 라 이 단계가 몇 분씩 걸리는데,
+# 이관 당일에는 그 시간이 그대로 서비스 중단 시간에 더해집니다.
+# pigz 가 있으면 코어 수만큼 병렬로 압축합니다(출력은 같은 gzip 형식이라
+# 받는 쪽은 바뀔 게 없습니다).
+#
+# 참고로 OpenSearch 스냅샷은 이미 압축돼 있어 압축률이 낮습니다.
+# 시간이 더 중요하면 ARCHIVE_COMPRESS=none 으로 압축을 끄세요.
+# -----------------------------------------------------------
 log "   패키징"
-tar -czf "$OUT_DIR/opensearch-snapshots.tar.gz" -C "$SNAPSHOT_DIR" .
-ok "$(du -h "$OUT_DIR/opensearch-snapshots.tar.gz" | cut -f1)"
+pkg_started=$(date +%s)
+archive="$OUT_DIR/opensearch-snapshots.tar.gz"
+
+if [ "${ARCHIVE_COMPRESS:-auto}" = "none" ]; then
+    # 이름은 유지합니다 — 받는 쪽은 tar -xf 로 자동 판별합니다.
+    tar -cf "$archive" -C "$SNAPSHOT_DIR" .
+    ok "압축 없음"
+elif command -v pigz >/dev/null 2>&1; then
+    tar -cf - -C "$SNAPSHOT_DIR" . | pigz -p "$(nproc)" > "$archive"
+    ok "pigz 병렬 압축 ($(nproc) 코어)"
+else
+    tar -czf "$archive" -C "$SNAPSHOT_DIR" .
+    warn "pigz 가 없어 단일 코어로 압축했습니다 — install.sh 를 다시 돌리면 설치됩니다"
+fi
+
+raw_bytes=$(du -sb "$SNAPSHOT_DIR" | cut -f1)
+pkg_bytes=$(stat -c %s "$archive")
+ok "$(du -h "$archive" | cut -f1) ($(( $(date +%s) - pkg_started ))초, 원본 대비 $(( pkg_bytes * 100 / raw_bytes ))%)"
 
 
 log "2. SQLite"
@@ -108,7 +135,7 @@ LexAI 이관 패키지
   2) cp .env.example .env  후 시크릿 작성 (OPENSEARCH_PASSWORD, JWT_SECRET)
   3) bash deploy/native/install.sh
   4) sha256sum -c checksums.sha256
-     mkdir -p ~/lexai-snapshots && tar -xzf opensearch-snapshots.tar.gz -C ~/lexai-snapshots
+     mkdir -p ~/lexai-snapshots && tar -xf opensearch-snapshots.tar.gz -C ~/lexai-snapshots   # -xf: 형식 자동 판별
      mkdir -p ~/lexai-data && cp lexai.db ~/lexai-data/lexai.db
   5) bash deploy/native/restore.sh
   6) bash deploy/native/start.sh

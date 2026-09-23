@@ -302,7 +302,8 @@ else
         warn "checksums.sha256 이 없어 아카이브 체크섬 확인을 건너뜁니다"
     fi
 
-    tar -xzf "$tmp/opensearch-snapshots.tar.gz" -C "$SNAPSHOT_DIR"
+    # -xf 는 압축 형식을 자동 판별합니다 (gzip / 무압축 둘 다 처리).
+    tar -xf "$tmp/opensearch-snapshots.tar.gz" -C "$SNAPSHOT_DIR"
     ok "색인 스냅샷 배치 ($(du -sh "$SNAPSHOT_DIR" | cut -f1))"
 
     if fetch "${SNAPSHOT_URI%/}/lexai.db" "$tmp/lexai.db" 2>/dev/null; then
