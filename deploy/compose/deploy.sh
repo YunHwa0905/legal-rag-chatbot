@@ -12,7 +12,7 @@
 #   4. compose 정의 수신 (파일 3개) — 저장소 clone 없음
 #   5. .env 생성 — 시크릿 자동 발급
 #   6. 레지스트리에서 이미지 pull → 기동
-#   7. 이관 패키지가 있으면 색인 복원
+#   7. 이관 패키지가 있으면 DB · 색인 복원
 #   8. 헬스체크
 #
 # -----------------------------------------------------------
@@ -413,6 +413,15 @@ else
     # -xf 는 압축 형식을 자동 판별합니다 (gzip / 무압축 둘 다 처리).
     tar -xf "$tmp/opensearch-snapshots.tar.gz" -C "$DEPLOY_DIR/deploy/snapshots"
     ok "색인 스냅샷 배치 ($(du -sh "$DEPLOY_DIR/deploy/snapshots" | cut -f1))"
+
+    # DB 는 기동 후에 볼륨 안으로 넣습니다(아래 9절). 여기서는 받아만 둡니다.
+    # 없으면 빈 DB 로 시작하는데, 그러면 기존 계정으로 로그인이 안 되어
+    # 이관 전후 동등성 확인의 첫 단계가 막힙니다.
+    if fetch "${SNAPSHOT_URI%/}/lexai.db" "$DEPLOY_DIR/deploy/lexai.db" 2>/dev/null; then
+        ok "DB 내려받음 ($(du -h "$DEPLOY_DIR/deploy/lexai.db" | cut -f1))"
+    else
+        warn "패키지에 lexai.db 가 없습니다 — 빈 DB 로 시작합니다"
+    fi
     rm -rf "$tmp"
 fi
 
@@ -458,12 +467,52 @@ fi
 
 
 # -----------------------------------------------------------
-# 8. 색인 복원
+# 8. SQLite DB
+#
+# 네이티브 형태는 DB 가 호스트 파일이라 그냥 갖다 놓으면 되지만, 컴포즈는
+# 네임드 볼륨 안에 있어 컨테이너가 떠야 접근할 수 있습니다. 그래서 기동
+# 뒤에 넣고 tomcat 만 다시 띄웁니다.
+#
+# entrypoint 는 DB 파일이 없을 때만 스키마를 만듭니다. 복원한 파일로
+# 덮어쓰고 재시작하면 그대로 씁니다.
+# -----------------------------------------------------------
+log "9. SQLite DB"
+db_users() {
+    { compose exec -T tomcat sqlite3 /var/lib/lexai/lexai.db \
+        "SELECT COUNT(*) FROM users;" 2>/dev/null | tr -d '\r'; } || true
+}
+
+if [ ! -f "$DEPLOY_DIR/deploy/lexai.db" ]; then
+    ok "이관 DB 없음 — entrypoint 가 만든 빈 스키마로 시작합니다"
+else
+    users="$(db_users)"
+    if [ "${users:-0}" -gt 0 ] 2>/dev/null; then
+        ok "이미 사용자 ${users}명 — 복원 건너뜀"
+    else
+        compose cp "$DEPLOY_DIR/deploy/lexai.db" tomcat:/var/lib/lexai/lexai.db
+        compose restart tomcat >/dev/null
+        # 재시작 직후에는 아직 응답하지 않습니다.
+        for _ in $(seq 1 12); do
+            users="$(db_users)"
+            [ "${users:-0}" -gt 0 ] 2>/dev/null && break
+            sleep 5
+        done
+        if [ "${users:-0}" -gt 0 ] 2>/dev/null; then
+            ok "DB 복원 — 사용자 ${users}명"
+        else
+            warn "DB 를 넣었지만 사용자가 0명입니다 — docker compose logs tomcat 확인"
+        fi
+    fi
+fi
+
+
+# -----------------------------------------------------------
+# 9. 색인 복원
 #
 # 스냅샷을 넣어둔 경우에만 돕니다. 이미 색인이 있으면 건너뜁니다 —
 # 재실행으로 멀쩡한 색인을 덮어쓰는 일을 막습니다.
 # -----------------------------------------------------------
-log "9. 색인"
+log "10. 색인"
 os() {  # os <curl 인자...>
     $DOCKER compose -f docker-compose.yml -f docker-compose.registry.yml \
         exec -T opensearch curl -sk -u "admin:${OS_PW}" "$@"
@@ -504,7 +553,7 @@ fi
 # -----------------------------------------------------------
 # 9. 헬스체크
 # -----------------------------------------------------------
-log "10. 확인"
+log "11. 확인"
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1/" || echo 000)
 [ "$code" = "200" ] && ok "프론트엔드 HTTP $code" || warn "프론트엔드 HTTP $code (기대 200)"
 
