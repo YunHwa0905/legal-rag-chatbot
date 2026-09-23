@@ -48,6 +48,15 @@ journalctl -u lexai-bootstrap-resume -f
 | `SNAPSHOT_URI` | — | 이관 패키지 위치 (`s3://` · `gs://` · `https://`) |
 | `SKIP_DRIVER=1` | — | GPU 이미지를 쓰는 경우 드라이버 설치 생략 |
 | `NO_START=1` | — | 준비만 하고 기동은 하지 않음 |
+| `TARGET_USER` | uid 1000 | root 로 실행될 때 서비스를 돌릴 사용자 |
+
+**이관 도구가 호출하는 경우** — CB-Tumblebug 의 `postCommands` 처럼 root 로
+실행되면, 대상 사용자를 정해 저장소를 그 사용자로 받은 뒤 같은 스크립트를
+그 사용자로 다시 실행합니다. 서비스가 `/root` 아래에 설치되어 나중에 사람이
+SSH 로 붙었을 때 아무것도 안 보이는 상황을 막기 위해서입니다.
+
+TTY 가 없으면 색상 제어문자를 출력하지 않고, `apt` 가 질문을 던지지 않도록
+비대화형으로 동작합니다.
 
 시크릿(`JWT_SECRET` · `OPENSEARCH_PASSWORD`)은 자동 발급되어 `.env` 에 들어가고,
 사본이 `~/.lexai-secrets` 에 남습니다. **이관 시 대상 환경에 같은 값을 넣어야**

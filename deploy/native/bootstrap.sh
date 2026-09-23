@@ -31,13 +31,11 @@
 
 set -euo pipefail
 
+# 이관 도구(postCommands)는 대화형이 아니므로 apt 가 질문을 던지면 멈춥니다.
+export DEBIAN_FRONTEND=noninteractive
+
 REPO_URL="${REPO_URL:-https://github.com/YunHwa0905/legal-rag-chatbot.git}"
 BRANCH="${BRANCH:-feat/sqlite}"
-REPO_DIR="${REPO_DIR:-$HOME/legal-rag-chatbot}"
-SNAPSHOT_DIR="${SNAPSHOT_DIR:-$HOME/lexai-snapshots}"
-DATA_DIR="${DATA_DIR:-$HOME/lexai-data}"
-SECRET_FILE="$HOME/.lexai-secrets"
-RESUME_UNIT="lexai-bootstrap-resume"
 
 RESUME=0
 NO_START="${NO_START:-0}"
@@ -50,10 +48,76 @@ for arg in "${@:-}"; do
     esac
 done
 
-log()  { printf '\033[1;35m[bootstrap]\033[0m %s\n' "$*"; }
-ok()   { printf '\033[0;32m  OK\033[0m   %s\n' "$*"; }
-warn() { printf '\033[0;33m  WARN\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[0;31m  FATAL\033[0m %s\n' "$*" >&2; exit 1; }
+# 이관 도구(postCommands)로 실행되면 TTY 가 없고 출력이 로그로 수집됩니다.
+# 색상 제어문자가 섞이면 읽기 어려우니 TTY 일 때만 색을 씁니다.
+if [ -t 1 ]; then
+    C_HEAD="\033[1;35m"; C_OK="\033[0;32m"
+    C_WARN="\033[0;33m"; C_ERR="\033[0;31m"; C_OFF="\033[0m"
+else
+    C_HEAD=""; C_OK=""; C_WARN=""; C_ERR=""; C_OFF=""
+fi
+
+log()  { printf '%b[bootstrap]%b %s\n' "$C_HEAD" "$C_OFF" "$*"; }
+ok()   { printf '%b  OK%b   %s\n' "$C_OK" "$C_OFF" "$*"; }
+warn() { printf '%b  WARN%b %s\n' "$C_WARN" "$C_OFF" "$*" >&2; }
+die()  { printf '%b  FATAL%b %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
+
+
+# -----------------------------------------------------------
+# 실행 사용자
+#
+# 이관 도구는 이 스크립트를 root 로 실행할 수 있습니다. 그런데 서비스는
+# 일반 사용자로 돌아야 합니다 — systemd 유닛의 User=, 파일 소유권, venv
+# 경로가 전부 그 사용자 기준이기 때문입니다. root 로 그냥 진행하면
+# /root 아래에 설치되어 나중에 사람이 SSH 로 붙었을 때 아무것도 안 보입니다.
+#
+# 그래서 root 면 대상 사용자를 정하고, 저장소를 그 사용자로 받은 뒤
+# 같은 스크립트를 그 사용자로 다시 실행합니다.
+#
+#   TARGET_USER 로 직접 지정할 수 있고, 없으면 uid 1000 을 씁니다
+#   (클라우드 이미지의 기본 로그인 계정이 대개 uid 1000 입니다).
+# -----------------------------------------------------------
+if [ "$(id -u)" -eq 0 ] && [ "${LEXAI_REEXEC:-0}" != "1" ]; then
+    _user="${TARGET_USER:-${SUDO_USER:-}}"
+    if [ -z "$_user" ] || [ "$_user" = "root" ]; then
+        _user="$( { getent passwd 1000 | cut -d: -f1; } || true )"
+    fi
+    [ -n "$_user" ] || die "일반 사용자를 찾지 못했습니다. TARGET_USER 로 지정하세요."
+
+    _home="$(getent passwd "$_user" | cut -d: -f6)"
+    _repo="${REPO_DIR:-$_home/legal-rag-chatbot}"
+
+    log "root 로 실행되었습니다 — ${_user} 사용자로 이어서 진행합니다"
+
+    if ! command -v git >/dev/null 2>&1; then
+        apt-get update -qq
+        apt-get install -y git curl openssl ca-certificates
+    fi
+
+    # 재실행할 스크립트가 디스크에 있어야 합니다. curl | bash 로 들어온 경우
+    # 파일 경로가 없으므로 먼저 저장소를 받습니다.
+    if [ ! -d "$_repo/.git" ]; then
+        sudo -u "$_user" -H git clone --quiet --branch "$BRANCH" "$REPO_URL" "$_repo"
+        ok "clone (${_user}): $_repo"
+    fi
+
+    _args=()
+    if [ "$RESUME" = "1" ]; then _args+=(--resume); fi
+    if [ "$NO_START" = "1" ]; then _args+=(--no-start); fi
+
+    exec sudo -u "$_user" -H env \
+        LEXAI_REEXEC=1 \
+        REPO_URL="$REPO_URL" BRANCH="$BRANCH" REPO_DIR="$_repo" \
+        SNAPSHOT_URI="${SNAPSHOT_URI:-}" SKIP_DRIVER="${SKIP_DRIVER:-0}" \
+        bash "$_repo/deploy/native/bootstrap.sh" "${_args[@]:-}"
+fi
+
+
+REPO_DIR="${REPO_DIR:-$HOME/legal-rag-chatbot}"
+SNAPSHOT_DIR="${SNAPSHOT_DIR:-$HOME/lexai-snapshots}"
+DATA_DIR="${DATA_DIR:-$HOME/lexai-data}"
+SECRET_FILE="$HOME/.lexai-secrets"
+RESUME_UNIT="lexai-bootstrap-resume"
 
 
 # -----------------------------------------------------------
