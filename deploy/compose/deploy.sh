@@ -58,7 +58,10 @@ SELF_URL="${RAW_BASE}/deploy/compose/deploy.sh"
 
 DEPLOY_DIR="${DEPLOY_DIR:-$HOME/lexai-compose}"
 RESUME_UNIT="lexai-compose-resume"
-SECRET_FILE="$HOME/.lexai-secrets"
+# ★ 네이티브(bootstrap.sh)는 ~/.lexai-secrets 를 씁니다. 같은 이름을 쓰면
+#   한 호스트에서 두 형태를 오갈 때 먼저 받은 쪽 시크릿이 덮여 사라집니다.
+#   형태별 VM 을 권장하지만 실제로 겹치는 일이 생겨 이름을 나눕니다.
+SECRET_FILE="$HOME/.lexai-secrets.compose"
 
 REGISTRY_PREFIX="${REGISTRY_PREFIX:-yunhwa0905}"
 IMAGE_TAG="${IMAGE_TAG:-v2}"

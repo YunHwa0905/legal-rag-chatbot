@@ -109,6 +109,7 @@ if [ "$(id -u)" -eq 0 ] && [ "${LEXAI_REEXEC:-0}" != "1" ]; then
         LEXAI_REEXEC=1 \
         REPO_URL="$REPO_URL" BRANCH="$BRANCH" REPO_DIR="$_repo" \
         SNAPSHOT_URI="${SNAPSHOT_URI:-}" SKIP_DRIVER="${SKIP_DRIVER:-0}" \
+        ALLOW_EMPTY_INDEX="${ALLOW_EMPTY_INDEX:-0}" \
         bash "$_repo/deploy/native/bootstrap.sh" "${_args[@]:-}"
 fi
 
@@ -238,6 +239,9 @@ Environment=BRANCH=$BRANCH
 Environment=REPO_DIR=$REPO_DIR
 Environment=SNAPSHOT_URI=${SNAPSHOT_URI:-}
 Environment=NO_START=$NO_START
+# ★ 재부팅 뒤에는 환경이 새로 시작됩니다. curl | bash 앞에 붙인 변수는
+#   여기 적어두지 않으면 사라지고, restore.sh 가 스냅샷이 없다며 죽습니다.
+Environment=ALLOW_EMPTY_INDEX=${ALLOW_EMPTY_INDEX:-0}
 ExecStart=$NATIVE_DIR/bootstrap.sh --resume
 
 [Install]
