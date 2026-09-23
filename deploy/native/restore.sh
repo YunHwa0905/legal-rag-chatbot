@@ -12,7 +12,9 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-SNAPSHOT_NAME="${SNAPSHOT_NAME:-legal-v1}"
+# 비워두면 저장소에서 가장 최근 SUCCESS 스냅샷을 고릅니다.
+# 특정 시점으로 되돌리려면 SNAPSHOT_NAME=legal-20260923-1025 처럼 지정하세요.
+SNAPSHOT_NAME="${SNAPSHOT_NAME:-}"
 SNAPSHOT_REPO="${SNAPSHOT_REPO:-lexai}"
 INDEX_NAME="${INDEX_NAME:-legal_documents}"
 BASE_MODEL="${BASE_MODEL:-gemma3:4b-it-q8_0}"
@@ -137,6 +139,24 @@ else
         -H 'Content-Type: application/json' \
         -d "{\"type\":\"fs\",\"settings\":{\"location\":\"${SNAPSHOT_DIR}\"}}" >/dev/null
     ok "스냅샷 저장소 등록"
+
+    # -----------------------------------------------------------
+    # 복원할 스냅샷 고르기
+    #
+    # ★ 예전에는 legal-v1 로 고정돼 있었습니다. backup.sh 가 만드는 이름은
+    #   legal-<타임스탬프> 라, 실제 이관 패키지를 복원하면 "없음" 으로 죽습니다.
+    #   손으로 만든 초기 스냅샷에만 맞는 기본값이었던 셈입니다.
+    # -----------------------------------------------------------
+    if [ -z "$SNAPSHOT_NAME" ]; then
+        SNAPSHOT_NAME=$( { os_curl "$OS_BASE/_cat/snapshots/${SNAPSHOT_REPO}?h=id,status,endEpoch" \
+            | awk '$2=="SUCCESS"' | sort -k3 -n | tail -1 | awk '{print $1}'; } || true )
+        if [ -z "$SNAPSHOT_NAME" ]; then
+            warn "저장소에 있는 스냅샷 목록:"
+            os_curl "$OS_BASE/_cat/snapshots/${SNAPSHOT_REPO}?v" || true
+            die "복원할 스냅샷이 없습니다 — $SNAPSHOT_DIR 내용을 확인하세요"
+        fi
+        ok "스냅샷 선택: $SNAPSHOT_NAME (가장 최근 SUCCESS)"
+    fi
 
     # ★ || true 가 없으면 grep 이 못 찾았을 때 pipefail 로 대입문 자체가 실패하고,
     #   set -e 가 die 를 실행하기도 전에 스크립트를 죽입니다. 원인 메시지 없이
