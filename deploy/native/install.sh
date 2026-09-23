@@ -98,36 +98,23 @@ fi
 
 OS_YML="$OPENSEARCH_HOME/config/opensearch.yml"
 
-# -----------------------------------------------------------
-# 설정 주입
-#
-# ★ "지우고 다시 추가" 패턴입니다. 그냥 덧붙이면 재실행할 때마다 같은 키가
-#   쌓여서 Duplicate field 로 기동이 즉시 실패합니다. 실제로 겪은 문제입니다.
-#
-# 뒤의 두 줄이 없으면 스냅샷 복원이 403 으로 막힙니다
-# (no permissions for [] — 권한 부족이 아니라 보안 플러그인의 복원 게이트).
-# 컨테이너 이미지는 이 값이 켜져 있어서 겪지 않던 문제입니다.
-# -----------------------------------------------------------
-sed -i '/^discovery\.type:/d; /^path\.repo:/d; /^plugins\.security\.enable_snapshot_restore_privilege:/d; /^plugins\.security\.check_snapshot_restore_write_privileges:/d' "$OS_YML"
-printf '\ndiscovery.type: single-node\npath.repo: ["%s"]\nplugins.security.enable_snapshot_restore_privilege: true\nplugins.security.check_snapshot_restore_write_privileges: false\n' \
-    "$SNAPSHOT_DIR" >> "$OS_YML"
-
-for key in discovery.type path.repo enable_snapshot_restore_privilege; do
-    count=$(grep -c "$key" "$OS_YML" || true)
-    [ "$count" -eq 1 ] || die "opensearch.yml 에 '$key' 가 ${count}번 있습니다 — 직접 정리하세요"
-done
-ok "opensearch.yml 설정 4개 주입"
+mkdir -p "$SNAPSHOT_DIR" "$DATA_DIR"
 
 sed -i "s/^-Xms.*/-Xms${OPENSEARCH_HEAP}/; s/^-Xmx.*/-Xmx${OPENSEARCH_HEAP}/" "$OPENSEARCH_HOME/config/jvm.options"
 ok "heap ${OPENSEARCH_HEAP}"
-
-mkdir -p "$SNAPSHOT_DIR" "$DATA_DIR"
 
 # -----------------------------------------------------------
 # 보안 플러그인 데모 설정 (최초 1회)
 #
 # 인증서와 admin 계정을 만듭니다. 이미 적용돼 있으면 건너뜁니다.
 # 비밀번호를 컨테이너 구성과 같게 두면 AI 서버 설정을 그대로 쓸 수 있습니다.
+#
+# ★ 반드시 아래의 설정 주입보다 먼저 와야 합니다. 데모 설치기는 yml 에
+#   plugins.security 로 시작하는 줄이 하나라도 있으면 "이미 설정된 환경"으로
+#   보고 아무것도 하지 않고 빠집니다:
+#     "opensearch.yml seems to be already configured for Security. Quit."
+#   순서를 바꿔 우리 설정을 먼저 넣으면 인증서가 영영 만들어지지 않고,
+#   노드는 SSL 설정이 없다며 기동을 거부합니다. 실제로 겪은 문제입니다.
 # -----------------------------------------------------------
 if grep -q "^plugins.security.ssl.transport.pemcert_filepath" "$OS_YML"; then
     ok "보안 설정 이미 적용됨 — 건너뜀"
@@ -153,9 +140,32 @@ else
     #   끝났습니다. 로그를 열어봐야 진짜 원인(SSL 설정 없음)이 보였습니다.
     grep -q "^plugins.security.ssl.transport.pemcert_filepath" "$OS_YML" \
         || die "보안 데모 설정이 적용되지 않았습니다 — 위 출력을 확인하세요.
-  이 상태로 기동하면 보안 플러그인이 SSL 설정을 못 찾아 노드가 죽습니다."
+  이 상태로 기동하면 보안 플러그인이 SSL 설정을 못 찾아 노드가 죽습니다.
+  'already configured for Security' 라고 나왔다면 yml 에 plugins.security 줄이
+  미리 들어간 것입니다. rm -rf $OPENSEARCH_HOME 후 다시 실행하세요."
     ok "보안 데모 설정 적용"
 fi
+
+
+# -----------------------------------------------------------
+# 설정 주입 (데모 설정 다음이어야 합니다 — 위 ★ 참고)
+#
+# ★ "지우고 다시 추가" 패턴입니다. 그냥 덧붙이면 재실행할 때마다 같은 키가
+#   쌓여서 Duplicate field 로 기동이 즉시 실패합니다. 실제로 겪은 문제입니다.
+#
+# 뒤의 두 줄이 없으면 스냅샷 복원이 403 으로 막힙니다
+# (no permissions for [] — 권한 부족이 아니라 보안 플러그인의 복원 게이트).
+# 컨테이너 이미지는 이 값이 켜져 있어서 겪지 않던 문제입니다.
+# -----------------------------------------------------------
+sed -i '/^discovery\.type:/d; /^path\.repo:/d; /^plugins\.security\.enable_snapshot_restore_privilege:/d; /^plugins\.security\.check_snapshot_restore_write_privileges:/d' "$OS_YML"
+printf '\ndiscovery.type: single-node\npath.repo: ["%s"]\nplugins.security.enable_snapshot_restore_privilege: true\nplugins.security.check_snapshot_restore_write_privileges: false\n' \
+    "$SNAPSHOT_DIR" >> "$OS_YML"
+
+for key in discovery.type path.repo enable_snapshot_restore_privilege; do
+    count=$(grep -c "$key" "$OS_YML" || true)
+    [ "$count" -eq 1 ] || die "opensearch.yml 에 '$key' 가 ${count}번 있습니다 — 직접 정리하세요"
+done
+ok "opensearch.yml 설정 4개 주입"
 
 
 log "5. systemd 유닛"
