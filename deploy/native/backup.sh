@@ -46,6 +46,12 @@ state=$(os_curl "$OS_BASE/_cat/snapshots/${SNAPSHOT_REPO}?h=id,status" | grep "^
 [ "$state" = "SUCCESS" ] || die "스냅샷 상태: ${state:-불명}"
 ok "${SNAPSHOT_NAME} (${snap_elapsed}초)"
 
+# 파일 목록(개수·용량·해시)을 스냅샷 디렉터리 안에 만들어 tar 에 함께 담습니다.
+# 대상 환경에서 압축을 풀면 목록도 같이 나와 그 자리에서 대조할 수 있습니다.
+log "   파일 목록 생성"
+write_manifest "$SNAPSHOT_DIR"
+ok "$(wc -l < "$SNAPSHOT_DIR/$MANIFEST_NAME")개 파일"
+
 log "   패키징"
 tar -czf "$OUT_DIR/opensearch-snapshots.tar.gz" -C "$SNAPSHOT_DIR" .
 ok "$(du -h "$OUT_DIR/opensearch-snapshots.tar.gz" | cut -f1)"
@@ -64,7 +70,16 @@ msgs=$(sqlite3 "$OUT_DIR/lexai.db" "SELECT COUNT(*) FROM chat_message;")
 ok "$(du -h "$OUT_DIR/lexai.db" | cut -f1) — 사용자 ${users} · 메시지 ${msgs}"
 
 
-log "3. 매니페스트"
+log "3. 체크섬"
+# 전송 중 손상을 대상 환경에서 곧바로 잡기 위한 아카이브 단위 해시입니다.
+# (압축을 푼 뒤의 내용 대조는 tar 안의 목록 파일이 담당합니다)
+( cd "$OUT_DIR" && sha256sum opensearch-snapshots.tar.gz lexai.db > checksums.sha256 )
+ok "checksums.sha256"
+
+snap_files=$(wc -l < "$SNAPSHOT_DIR/$MANIFEST_NAME")
+snap_bytes=$(awk -F'	' '{s+=$2} END {print s+0}' "$SNAPSHOT_DIR/$MANIFEST_NAME")
+
+log "4. 매니페스트"
 # -----------------------------------------------------------
 cat > "$OUT_DIR/MANIFEST.txt" <<EOF
 LexAI 이관 패키지
@@ -74,7 +89,14 @@ LexAI 이관 패키지
 
 내용
   opensearch-snapshots.tar.gz  색인 ${docs}건 (스냅샷 ${SNAPSHOT_NAME}, 생성 ${snap_elapsed}초)
+                               파일 ${snap_files}개 / ${snap_bytes} bytes (압축 전)
   lexai.db                     사용자 ${users} · 메시지 ${msgs}
+  checksums.sha256             위 두 파일의 SHA-256
+
+정합성 확인
+  전송 직후   sha256sum -c checksums.sha256
+  복원 직후   restore.sh 가 압축 해제된 파일의 개수·총 용량·해시를 대조합니다
+              (목록 파일 contents.tsv 가 아카이브 안에 함께 들어 있습니다)
 
 포함하지 않은 것
   Ollama 모델   대상 환경에서 restore.sh 가 자동으로 받습니다
@@ -85,7 +107,8 @@ LexAI 이관 패키지
   1) git clone <repo> && cd legal-rag-chatbot
   2) cp .env.example .env  후 시크릿 작성 (OPENSEARCH_PASSWORD, JWT_SECRET)
   3) bash deploy/native/install.sh
-  4) mkdir -p ~/lexai-snapshots && tar -xzf opensearch-snapshots.tar.gz -C ~/lexai-snapshots
+  4) sha256sum -c checksums.sha256
+     mkdir -p ~/lexai-snapshots && tar -xzf opensearch-snapshots.tar.gz -C ~/lexai-snapshots
      mkdir -p ~/lexai-data && cp lexai.db ~/lexai-data/lexai.db
   5) bash deploy/native/restore.sh
   6) bash deploy/native/start.sh

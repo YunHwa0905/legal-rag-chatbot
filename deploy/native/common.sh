@@ -136,6 +136,61 @@ port_in_use() {
     ss -tln 2>/dev/null | grep -q ":$1 "
 }
 
+# -----------------------------------------------------------
+# 데이터 정합성
+#
+# 계약 요구사항이 "용량 · 파일 개수 · 해시" 세 가지 대조입니다. 옮기는
+# 도중 조용히 잘리거나 빠지는 일을 잡기 위한 것이라, 셋을 모두 봐야
+# 의미가 있습니다 — 개수만 맞고 내용이 다르거나, 해시는 같은데 파일이
+# 빠져 있는 경우를 각각 놓치기 때문입니다.
+#
+# 목록 파일(contents.tsv) 형식: 상대경로 <TAB> 바이트 <TAB> sha256
+# -----------------------------------------------------------
+MANIFEST_NAME="contents.tsv"
+
+# write_manifest <디렉터리> — 자기 자신은 목록에서 제외합니다.
+write_manifest() {
+    local dir="$1"
+    ( cd "$dir" && find . -type f ! -name "$MANIFEST_NAME" -print0         | sort -z         | while IFS= read -r -d "" f; do
+            printf '%s	%s	%s
+' "${f#./}" "$(stat -c %s "$f")" "$(sha256sum "$f" | cut -d" " -f1)"
+          done ) > "$dir/$MANIFEST_NAME"
+}
+
+# verify_manifest <디렉터리> — 개수 · 총 용량 · 해시를 대조합니다.
+# 하나라도 어긋나면 1 을 돌려주고 어긋난 항목을 출력합니다.
+verify_manifest() {
+    local dir="$1" manifest="$1/$MANIFEST_NAME"
+    [ -f "$manifest" ] || { warn "목록 파일이 없어 정합성 대조를 건너뜁니다: $manifest"; return 0; }
+
+    local want_count want_bytes have_count have_bytes bad=0
+    want_count=$(wc -l < "$manifest")
+    want_bytes=$(awk -F"	" '{s+=$2} END {print s+0}' "$manifest")
+
+    have_count=$(find "$dir" -type f ! -name "$MANIFEST_NAME" | wc -l)
+    have_bytes=$(find "$dir" -type f ! -name "$MANIFEST_NAME" -printf '%s
+' | awk '{s+=$1} END {print s+0}')
+
+    [ "$want_count" = "$have_count" ] || { warn "파일 개수 불일치: 기대 ${want_count} / 실제 ${have_count}"; bad=1; }
+    [ "$want_bytes" = "$have_bytes" ] || { warn "총 용량 불일치: 기대 ${want_bytes} / 실제 ${have_bytes}"; bad=1; }
+
+    # 해시는 sha256sum -c 에 맡깁니다. 목록 형식을 그 도구가 읽는 형태로 바꿔 넘깁니다.
+    local mismatched
+    mismatched=$( ( cd "$dir" && awk -F"	" '{print $3"  "$1}' "$MANIFEST_NAME"         | sha256sum -c --quiet 2>&1 ) | head -20 || true )
+    if [ -n "$mismatched" ]; then
+        warn "해시 불일치:"
+        printf '%s
+' "$mismatched" >&2
+        bad=1
+    fi
+
+    if [ "$bad" = "0" ]; then
+        ok "정합성 대조 통과 — 파일 ${have_count}개 / $(numfmt --to=iec "$have_bytes" 2>/dev/null || echo "${have_bytes}B")"
+        return 0
+    fi
+    return 1
+}
+
 # 조건이 참이 될 때까지 대기. wait_for <설명> <최대초> <명령...>
 wait_for() {
     local label="$1" timeout="$2"; shift 2

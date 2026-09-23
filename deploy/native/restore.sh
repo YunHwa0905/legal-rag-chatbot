@@ -104,6 +104,14 @@ else
         ok "스냅샷 디렉터리 소유권 정정"
     fi
 
+    # 계약 요구사항인 "용량 · 파일 개수 · 해시" 3종 대조입니다.
+    # 목록 파일은 아카이브 안에 함께 들어 있어, 압축을 푼 그 자리에서
+    # 옮기는 중 빠지거나 잘린 파일이 없는지 확인합니다.
+    log "   정합성 대조"
+    if ! verify_manifest "$SNAPSHOT_DIR"; then
+        die "정합성 대조 실패 — 전송이 온전하지 않습니다. 패키지를 다시 받으세요."
+    fi
+
     os_curl -X PUT "$OS_BASE/_snapshot/${SNAPSHOT_REPO}" \
         -H 'Content-Type: application/json' \
         -d "{\"type\":\"fs\",\"settings\":{\"location\":\"${SNAPSHOT_DIR}\"}}" >/dev/null

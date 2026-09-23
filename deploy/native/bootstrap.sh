@@ -287,8 +287,22 @@ else
     }
 
     log "   내려받는 중: $SNAPSHOT_URI"
-    fetch "${SNAPSHOT_URI%/}/opensearch-snapshots.tar.gz" "$tmp/snap.tar.gz"
-    tar -xzf "$tmp/snap.tar.gz" -C "$SNAPSHOT_DIR"
+    fetch "${SNAPSHOT_URI%/}/opensearch-snapshots.tar.gz" "$tmp/opensearch-snapshots.tar.gz"
+
+    # 전송 손상을 압축 풀기 전에 잡습니다. 체크섬 파일이 없으면 건너뛰되,
+    # 있는데 안 맞으면 여기서 멈춥니다 — 깨진 아카이브를 풀어봐야
+    # 뒤에서 더 알기 어려운 형태로 실패할 뿐입니다.
+    if fetch "${SNAPSHOT_URI%/}/checksums.sha256" "$tmp/checksums.sha256" 2>/dev/null; then
+        if ( cd "$tmp" && grep "opensearch-snapshots.tar.gz" checksums.sha256 | sha256sum -c --quiet ); then
+            ok "아카이브 체크섬 확인"
+        else
+            die "아카이브 체크섬 불일치 — 전송이 온전하지 않습니다"
+        fi
+    else
+        warn "checksums.sha256 이 없어 아카이브 체크섬 확인을 건너뜁니다"
+    fi
+
+    tar -xzf "$tmp/opensearch-snapshots.tar.gz" -C "$SNAPSHOT_DIR"
     ok "색인 스냅샷 배치 ($(du -sh "$SNAPSHOT_DIR" | cut -f1))"
 
     if fetch "${SNAPSHOT_URI%/}/lexai.db" "$tmp/lexai.db" 2>/dev/null; then
