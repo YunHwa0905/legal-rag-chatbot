@@ -57,18 +57,24 @@ stop_pid() {
 
 log "종료 시작"
 
-want frontend   && stop_pid "Frontend"   "$PID_DIR/frontend.pid"
-want tomcat     && stop_pid "Tomcat"     "$PID_DIR/tomcat.pid" group
-# 안전망: setsid 가 프로세스 그룹을 새로 만드는지는 실행 환경(잡 컨트롤 여부)에
-# 따라 달라집니다. 그룹 종료가 빗나가면 mvn 이 띄운 JVM 이 포트를 잡은 채 남아,
-# 다음 기동이 "이미 실행 중"으로 오판합니다. 포트로 확인하고 정리합니다.
-if want tomcat && port_in_use "$TOMCAT_PORT"; then
-    warn "Tomcat 포트가 아직 열려 있어 프로세스를 직접 정리합니다"
-    pkill -f "tomcat7:run" 2>/dev/null
-    sleep 3
-    port_in_use "$TOMCAT_PORT" && warn "포트 ${TOMCAT_PORT} 가 여전히 점유 중입니다" || ok "Tomcat 정리 완료"
-fi
-want ai         && stop_pid "AI 서버"     "$PID_DIR/ai.pid"
+# 앱 3종은 systemd 가 관리합니다. cgroup 단위로 정리되므로 mvn 이 띄운
+# JVM 같은 자식 프로세스가 남지 않습니다 — 예전에 프로세스 그룹을 직접
+# 다루며 겪던 문제가 구조적으로 사라졌습니다.
+stop_unit() {  # stop_unit <유닛> <이름>
+    if [ ! -f "$SYSTEMD_DIR/$1.service" ]; then
+        ok "$2: 유닛 없음 — 건너뜀"
+        return
+    fi
+    if ! systemctl is-active --quiet "$1"; then
+        ok "$2: 이미 정지됨"
+        return
+    fi
+    sudo systemctl stop "$1" && ok "$2 종료 (systemd)"
+}
+
+want frontend && stop_unit lexai-frontend "Frontend"
+want tomcat   && stop_unit lexai-tomcat   "Tomcat"
+want ai       && stop_unit lexai-ai       "AI 서버"
 want opensearch && stop_pid "OpenSearch" "$PID_DIR/opensearch.pid"
 # 안전망: PID 파일 없이 떠 있는 경우입니다. 손으로 띄웠거나, start.sh 가
 # "포트가 이미 열려 있음"으로 판단해 건너뛰면 PID 파일이 만들어지지 않습니다.

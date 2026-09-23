@@ -131,15 +131,35 @@ fi
 
 
 log "6. 로그 에러"
+# 앱 로그는 journal 로 갑니다. 서비스가 켜진 시점 이후만 봅니다 —
+# 이전 회차의 실패가 이번 판정에 섞이면 안 되기 때문입니다.
 errs=0
-for f in ai tomcat frontend; do
-    [ -f "$LOG_DIR/$f.log" ] || continue
-    # DEBUG 로그에 error='null' 같은 문자열이 흔해서 단순 grep 은 오탐이 심합니다
-    # (Lettuce/MyBatis 디버그 출력만으로 수십 건이 잡힙니다).
-    # 실제 문제를 나타내는 패턴만 셉니다.
-    n=$(grep -cE "Traceback \(most recent|^Caused by:|Exception in thread|ERROR|SEVERE" "$LOG_DIR/$f.log" 2>/dev/null)
-    [ "${n:-0}" -gt 0 ] && { warn "$f.log 에 에러 흔적 ${n}건"; errs=$((errs+n)); }
+for unit in lexai-ai lexai-tomcat lexai-frontend; do
+    systemctl is-active --quiet "$unit" || continue
+    since=$(systemctl show -p ActiveEnterTimestamp --value "$unit" 2>/dev/null)
+    if [ -n "$since" ]; then
+        logs=$(journalctl -u "$unit" --since "$since" --no-pager 2>/dev/null)
+    else
+        logs=$(journalctl -u "$unit" -n 500 --no-pager 2>/dev/null)
+    fi
+    # DEBUG 로그에 error='null' 같은 문자열이 흔해서 단순 grep 은 오탐이
+    # 심합니다(디버그 출력만으로 수십 건). 실제 문제 패턴만 셉니다.
+    n=$(printf '%s' "$logs" | grep -cE "Traceback \(most recent|^Caused by:|Exception in thread|ERROR|SEVERE")
+    if [ "${n:-0}" -gt 0 ]; then
+        warn "${unit} 에 에러 흔적 ${n}건 — journalctl -u ${unit}"
+        errs=$((errs + n))
+    fi
 done
+
+# OpenSearch 는 tarball 배포라 파일 로그를 씁니다.
+if [ -f "$LOG_DIR/opensearch.log" ]; then
+    n=$(grep -cE "^\[.*\]\[ERROR|Exception in thread" "$LOG_DIR/opensearch.log" 2>/dev/null)
+    if [ "${n:-0}" -gt 0 ]; then
+        warn "opensearch.log 에 에러 흔적 ${n}건"
+        errs=$((errs + n))
+    fi
+fi
+
 [ "$errs" -eq 0 ] && pass "에러 없음" || warn "총 ${errs}건 — 치명적 여부는 직접 확인하세요"
 
 

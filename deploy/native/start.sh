@@ -65,116 +65,102 @@ fi
 
 
 # -----------------------------------------------------------
-# AI 서버
-# -----------------------------------------------------------
-if want ai; then
-    log "AI 서버"
-    if port_in_use "$AI_PORT"; then
-        ok "이미 실행 중 (포트 ${AI_PORT})"
-    else
-        [ -d "$REPO_DIR/ai/.venv" ] || die "venv 가 없습니다: $REPO_DIR/ai/.venv"
-        load_opensearch_creds
-        (
-            cd "$REPO_DIR/ai"
-            # shellcheck disable=SC1091
-            source .venv/bin/activate
-            export OPENSEARCH_HOST=127.0.0.1
-            export OPENSEARCH_PORT="$OPENSEARCH_PORT"
-            export OPENSEARCH_USE_SSL=true
-            export OPENSEARCH_USER OPENSEARCH_PASSWORD
-            export OLLAMA_BASE_URL="http://127.0.0.1:${OLLAMA_PORT}"
-            export OLLAMA_MODEL="${OLLAMA_MODEL:-legal-gemma}"
-            export EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-cpu}"
-
-            # 결정적 추론 설정 — .env 에 값이 있을 때만 전달합니다.
-            # 평소 운영에서는 비워두고, 이관 전후를 비교할 때만 채웁니다.
-            _seed="$(env_value LLM_SEED)"
-            if [ -n "$_seed" ]; then export LLM_SEED="$_seed"; fi
-            _temp="$(env_value TEMPERATURE)"
-            if [ -n "$_temp" ]; then export TEMPERATURE="$_temp"; fi
-            nohup uvicorn main:app --host 0.0.0.0 --port "$AI_PORT" \
-                > "$LOG_DIR/ai.log" 2>&1 &
-            echo $! > "$PID_DIR/ai.pid"
-        )
-        # 임베딩 모델 로드 때문에 최초 기동이 오래 걸립니다.
-        wait_for "AI 서버" 300 curl -sf "http://127.0.0.1:${AI_PORT}/api/v1/health" \
-            || die "기동 실패 — $LOG_DIR/ai.log 확인"
-        ok "기동 (PID $(cat "$PID_DIR/ai.pid"))"
-    fi
-fi
-
-
-# -----------------------------------------------------------
-# Tomcat
+# 환경변수 파일
 #
-# db.properties 를 .env 로부터 생성합니다. 컨테이너 구성에서
-# docker-entrypoint.sh 가 하던 일을 여기서 대신합니다.
+# 앱 3종이 공유하는 설정을 표준 위치에 한 번만 씁니다. 유닛의
+# EnvironmentFile 이 이 파일을 읽으므로, 이관 도구도 같은 경로에서
+# 워크로드 설정을 확인할 수 있습니다.
 #
-# ★ 경로는 반드시 절대경로여야 합니다. 상대경로면 mvn 실행 위치를 따라가
-#   빈 DB 를 새로 만들고, 테이블이 없어 첫 회원가입이 500 으로 실패합니다.
+# 매 기동마다 .env 로부터 새로 만듭니다 — 설정을 고치고 재기동하면
+# 그대로 반영되고, 어느 값이 적용됐는지 한 곳에서 확인됩니다.
 # -----------------------------------------------------------
-if want tomcat; then
-    log "Tomcat"
-    if port_in_use "$TOMCAT_PORT"; then
-        ok "이미 실행 중 (포트 ${TOMCAT_PORT})"
-    else
-        [ -f "$DB_PATH" ] || die "DB 파일이 없습니다: $DB_PATH (restore.sh 를 먼저 실행하세요)"
+write_env_file() {
+    load_opensearch_creds
 
-        JWT_SECRET="$(env_value JWT_SECRET)"
-        [ "${#JWT_SECRET}" -ge 32 ] || die "JWT_SECRET 이 32자 미만입니다 (HS256 최소 길이)"
+    local jwt; jwt="$(env_value JWT_SECRET)"
+    [ "${#jwt}" -ge 32 ] || die "JWT_SECRET 이 32자 미만입니다 (HS256 최소 길이)"
+    [ -f "$DB_PATH" ] || die "DB 파일이 없습니다: $DB_PATH (restore.sh 를 먼저 실행하세요)"
 
-        props="$REPO_DIR/backend_spring/src/main/resources/db.properties"
-        cat > "$props" <<EOF
+    local seed temp
+    seed="$(env_value LLM_SEED)"
+    temp="$(env_value TEMPERATURE)"
+
+    sudo mkdir -p "$ENV_DIR"
+    {
+        echo "# start.sh 가 .env 로부터 자동 생성합니다. 직접 수정하면 다음 기동에 덮어써집니다."
+        echo "TZ=${TZ}"
+        echo "DB_PATH=${DB_PATH}"
+        echo "OPENSEARCH_HOST=127.0.0.1"
+        echo "OPENSEARCH_PORT=${OPENSEARCH_PORT}"
+        echo "OPENSEARCH_USE_SSL=true"
+        echo "OPENSEARCH_USER=${OPENSEARCH_USER}"
+        echo "OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD}"
+        echo "OLLAMA_BASE_URL=http://127.0.0.1:${OLLAMA_PORT}"
+        echo "OLLAMA_MODEL=${OLLAMA_MODEL:-legal-gemma}"
+        echo "EMBEDDING_DEVICE=${EMBEDDING_DEVICE:-cpu}"
+        # if 로 쓰는 이유: [ ] && echo 형태면 값이 빌 때 AND-list 가 실패로
+        # 잡히고, set -e 가 이 파이프라인 서브셸을 그 자리에서 끝내버려
+        # 아래 항목들이 파일에 기록되지 않습니다.
+        if [ -n "$seed" ]; then echo "LLM_SEED=${seed}"; fi
+        if [ -n "$temp" ]; then echo "TEMPERATURE=${temp}"; fi
+        echo "PORT=${FRONTEND_PORT}"
+        echo "BACKEND_URL=${API_BASE}"
+        echo "JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/java-11-openjdk-amd64}"
+    } | sudo tee "$ENV_FILE" >/dev/null
+
+    # OpenSearch 비밀번호가 들어 있으므로 일반 읽기를 막습니다.
+    sudo chown "root:$(id -gn)" "$ENV_FILE"
+    sudo chmod 640 "$ENV_FILE"
+
+    # db.properties 는 Spring 의 property-placeholder 가 클래스패스에서
+    # 읽으므로 별도로 필요합니다(EnvironmentFile 로는 대체 불가).
+    cat > "$REPO_DIR/backend_spring/src/main/resources/db.properties" <<EOF
 # start.sh 가 .env 로부터 자동 생성합니다. 직접 수정해도 다음 기동에서 덮어씁니다.
-# ★ git 추적 파일이므로 커밋하지 마세요.
 db.driver.Class=org.sqlite.JDBC
 db.url=jdbc:sqlite:${DB_PATH}
 fastapi.url=http://127.0.0.1:${AI_PORT}
 redis.host=127.0.0.1
 redis.port=6379
-jwt.secret=${JWT_SECRET}
+jwt.secret=${jwt}
 jwt.expiration=$(env_value JWT_EXPIRATION || echo 86400000)
 EOF
-        ok "db.properties 생성 (db=$DB_PATH)"
+}
 
-        (
-            cd "$REPO_DIR/backend_spring"
-            export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-11-openjdk-amd64}"
-            # setsid 로 별도 프로세스 그룹을 만듭니다. mvn 이 JVM 을 자식으로
-            # 띄우기 때문에, 종료할 때 그룹째 정리해야 Tomcat 이 남지 않습니다.
-            setsid nohup mvn -q tomcat7:run > "$LOG_DIR/tomcat.log" 2>&1 &
-            echo $! > "$PID_DIR/tomcat.pid"
-        )
-        # 컨텍스트 루트는 404 라서 HTTP 응답으로 판정하면 안 됩니다. 포트로 봅니다.
-        if ! wait_for "Tomcat" 240 port_in_use "$TOMCAT_PORT"; then
-            die "기동 실패 — $LOG_DIR/tomcat.log 확인"
-        fi
-        ok "기동 (PGID $(cat "$PID_DIR/tomcat.pid"))"
+# start_unit <유닛> <설명> <준비완료 판정 명령...>
+start_unit() {
+    local unit="$1" label="$2"; shift 2
+    log "$label"
+    [ -f "$SYSTEMD_DIR/${unit}.service" ] || die "유닛이 없습니다 — install.sh 를 먼저 실행하세요"
+
+    if systemctl is-active --quiet "$unit"; then
+        ok "이미 실행 중"
+        return
     fi
+    sudo systemctl start "$unit"
+    if ! wait_for "$label" 300 "$@"; then
+        sudo systemctl status "$unit" --no-pager -l | tail -15
+        die "기동 실패 — journalctl -u ${unit} -n 50"
+    fi
+    ok "기동 (systemd: ${unit})"
+}
+
+if want ai || want tomcat || want frontend; then
+    write_env_file
+    ok "환경변수 파일 생성: $ENV_FILE"
 fi
 
+# 임베딩 모델을 미리 로드하므로 최초 기동이 오래 걸립니다.
+if want ai; then
+    start_unit lexai-ai "AI 서버" curl -sf "http://127.0.0.1:${AI_PORT}/api/v1/health"
+fi
 
-# -----------------------------------------------------------
-# Frontend
-#
-# /api 는 이 서버가 Tomcat 으로 프록시합니다(리버스 프록시 불필요).
-# -----------------------------------------------------------
+# 컨텍스트 루트는 404 라서 HTTP 응답으로 판정하면 안 됩니다. 포트로 봅니다.
+if want tomcat; then
+    start_unit lexai-tomcat "Tomcat" port_in_use "$TOMCAT_PORT"
+fi
+
 if want frontend; then
-    log "Frontend"
-    if port_in_use "$FRONTEND_PORT"; then
-        ok "이미 실행 중 (포트 ${FRONTEND_PORT})"
-    else
-        (
-            cd "$REPO_DIR/frontend"
-            export PORT="$FRONTEND_PORT"
-            export BACKEND_URL="${API_BASE}"
-            nohup node server.js > "$LOG_DIR/frontend.log" 2>&1 &
-            echo $! > "$PID_DIR/frontend.pid"
-        )
-        wait_for "Frontend" 30 curl -sf -o /dev/null "http://127.0.0.1:${FRONTEND_PORT}/" \
-            || die "기동 실패 — $LOG_DIR/frontend.log 확인"
-        ok "기동 (PID $(cat "$PID_DIR/frontend.pid"))"
-    fi
+    start_unit lexai-frontend "Frontend" curl -sf -o /dev/null "http://127.0.0.1:${FRONTEND_PORT}/"
 fi
 
 
@@ -182,5 +168,6 @@ echo
 log "기동 완료"
 echo "  Frontend : http://127.0.0.1:${FRONTEND_PORT}"
 echo "  API      : ${API_BASE}"
-echo "  로그     : $LOG_DIR"
+echo "  로그     : journalctl -u lexai-ai -f   (lexai-tomcat / lexai-frontend)"
+echo "  OpenSearch : $LOG_DIR/opensearch.log"
 echo "  검증     : bash deploy/native/verify.sh"

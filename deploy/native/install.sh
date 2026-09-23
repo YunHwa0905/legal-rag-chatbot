@@ -142,7 +142,66 @@ else
 fi
 
 
-log "5. 애플리케이션 의존성"
+log "5. systemd 유닛"
+# -----------------------------------------------------------
+# 앱 3종을 유닛으로 등록합니다.
+#
+# 여기서는 파일만 설치합니다. 환경변수 파일은 기동 시점에 .env 로부터
+# 만들어야 최신 값이 반영되므로 start.sh 가 담당합니다.
+# -----------------------------------------------------------
+RUN_USER="$(id -un)"
+JAVA11_HOME="${JAVA11_HOME:-/usr/lib/jvm/java-11-openjdk-amd64}"
+
+sudo mkdir -p "$ENV_DIR"
+
+write_unit() {  # write_unit <이름> <설명> <작업디렉터리> <실행명령>
+    sudo tee "$SYSTEMD_DIR/$1.service" >/dev/null <<EOF
+[Unit]
+Description=$2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${RUN_USER}
+WorkingDirectory=$3
+EnvironmentFile=${ENV_FILE}
+ExecStart=$4
+Restart=on-failure
+RestartSec=5
+# 로그는 journal 로 갑니다: journalctl -u $1 -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+write_unit "lexai-ai" \
+    "LexAI AI server (FastAPI RAG)" \
+    "$REPO_DIR/ai" \
+    "$REPO_DIR/ai/.venv/bin/uvicorn main:app --host 0.0.0.0 --port $AI_PORT"
+
+# mvn 은 JVM 을 자식으로 띄우지만 systemd 가 cgroup 으로 묶어 정리하므로
+# 예전처럼 프로세스 그룹을 직접 다룰 필요가 없습니다.
+write_unit "lexai-tomcat" \
+    "LexAI backend (Spring Legacy WAR on Tomcat)" \
+    "$REPO_DIR/backend_spring" \
+    "/usr/bin/mvn -q tomcat7:run"
+
+write_unit "lexai-frontend" \
+    "LexAI frontend (static + /api proxy)" \
+    "$REPO_DIR/frontend" \
+    "/usr/bin/node server.js"
+
+sudo systemctl daemon-reload
+ok "유닛 3종 등록 — $SYSTEMD_DIR/lexai-*.service"
+ok "환경변수 파일: $ENV_FILE (start.sh 가 생성)"
+
+
+
+log "6. 애플리케이션 의존성"
 # -----------------------------------------------------------
 if [ -d "$REPO_DIR/frontend" ]; then
     (cd "$REPO_DIR/frontend" && npm ci --omit=dev >/dev/null)

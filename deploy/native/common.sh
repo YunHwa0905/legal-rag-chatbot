@@ -23,6 +23,21 @@ LOG_DIR="$RUN_DIR/logs"
 PID_DIR="$RUN_DIR/pids"
 
 # -----------------------------------------------------------
+# systemd
+#
+# 앱 3종을 유닛으로 돌립니다. 직접 nohup 으로 띄우던 방식에서 옮긴 이유는
+# 이관 도구가 워크로드를 식별할 수 있어야 하기 때문입니다 — 실행 명령
+# (ExecStart)과 환경변수(EnvironmentFile)가 표준 위치에 노출됩니다.
+#
+# 부수 효과로 종료가 확실해집니다. mvn 은 JVM 을 자식으로 띄우는데,
+# systemd 는 cgroup 단위로 정리해서 자식이 남지 않습니다.
+# -----------------------------------------------------------
+SYSTEMD_DIR="/etc/systemd/system"
+ENV_DIR="${ENV_DIR:-/etc/lexai}"
+ENV_FILE="$ENV_DIR/lexai.env"
+UNITS="lexai-ai lexai-tomcat lexai-frontend"
+
+# -----------------------------------------------------------
 # 포트
 #
 # ★ localhost 가 아니라 127.0.0.1 을 씁니다. Node 17+ 는 DNS 응답 순서를
