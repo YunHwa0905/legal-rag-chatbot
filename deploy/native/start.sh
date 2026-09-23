@@ -85,6 +85,13 @@ if want ai; then
             export OLLAMA_BASE_URL="http://127.0.0.1:${OLLAMA_PORT}"
             export OLLAMA_MODEL="${OLLAMA_MODEL:-legal-gemma}"
             export EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-cpu}"
+
+            # 결정적 추론 설정 — .env 에 값이 있을 때만 전달합니다.
+            # 평소 운영에서는 비워두고, 이관 전후를 비교할 때만 채웁니다.
+            _seed="$(env_value LLM_SEED)"
+            if [ -n "$_seed" ]; then export LLM_SEED="$_seed"; fi
+            _temp="$(env_value TEMPERATURE)"
+            if [ -n "$_temp" ]; then export TEMPERATURE="$_temp"; fi
             nohup uvicorn main:app --host 0.0.0.0 --port "$AI_PORT" \
                 > "$LOG_DIR/ai.log" 2>&1 &
             echo $! > "$PID_DIR/ai.pid"

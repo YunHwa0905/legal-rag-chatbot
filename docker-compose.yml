@@ -112,6 +112,8 @@ services:
       MAX_NEW_TOKENS: ${MAX_NEW_TOKENS:-768}
       TEMPERATURE: ${TEMPERATURE:-0.1}
       TOP_P: ${TOP_P:-0.9}
+      # 이관 전후 동등성 비교용. -1 은 미지정(평소 운영) 입니다.
+      LLM_SEED: ${LLM_SEED:--1}
 
       EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
       # 프록시 뒤 단일 오리진이라 CORS 불필요. 값이 있으면 그 오리진만 허용.

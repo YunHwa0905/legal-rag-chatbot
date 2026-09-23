@@ -47,6 +47,7 @@ def generate(
     model: str = None,
     max_tokens: int = None,
     temperature: float = None,
+    seed: int = None,
 ) -> str:
     target_model = model or OLLAMA_MODEL
 
@@ -59,6 +60,21 @@ def generate(
     # Gemma는 system role 미지원 → user 메시지에 합쳐서 전달
     combined = system_prompt + "\n\n" + user_message
 
+    options = {
+        "temperature":    temperature if temperature is not None else settings.TEMPERATURE,
+        "top_p":          settings.TOP_P,
+        "num_predict":    max_tokens if max_tokens is not None else settings.MAX_NEW_TOKENS,
+        "repeat_penalty": 1.1,
+        "num_ctx":        4096,
+    }
+
+    # 시드는 지정했을 때만 넘깁니다. Ollama 는 seed 를 받지 않으면 매 호출
+    # 무작위로 두는데, 그게 평소 운영에서 원하는 동작입니다. 이관 전후를
+    # 비교할 때만 .env 로 고정값을 주입합니다(LLM_SEED).
+    resolved_seed = seed if seed is not None else settings.LLM_SEED
+    if resolved_seed >= 0:
+        options["seed"] = resolved_seed
+
     response = requests.post(
         f"{OLLAMA_BASE_URL}/api/chat",
         json={
@@ -67,13 +83,7 @@ def generate(
                 {"role": "user", "content": combined},
             ],
             "stream": False,
-            "options": {
-                "temperature":    temperature if temperature is not None else settings.TEMPERATURE,
-                "top_p":          settings.TOP_P,
-                "num_predict":    max_tokens if max_tokens is not None else settings.MAX_NEW_TOKENS,
-                "repeat_penalty": 1.1,
-                "num_ctx":        4096,
-            },
+            "options": options,
         },
         timeout=300,
     )
