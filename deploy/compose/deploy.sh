@@ -149,13 +149,44 @@ fi
 
 mkdir -p "$DEPLOY_DIR"
 
-# 재부팅 후 이어서 실행하려면 스크립트가 디스크에 있어야 합니다.
-# curl | bash 로 들어온 경우 파일 경로가 없으므로 사본을 받아둡니다.
-if [ ! -f "$DEPLOY_DIR/deploy.sh" ]; then
-    curl -fsSL "$SELF_URL" -o "$DEPLOY_DIR/deploy.sh"
-    chmod +x "$DEPLOY_DIR/deploy.sh"
-fi
 ok "배포 디렉터리: $DEPLOY_DIR"
+
+# -----------------------------------------------------------
+# ★ 사본 갱신 후 파일에서 다시 실행
+#
+# 두 가지를 동시에 해결합니다.
+#
+# 1) curl | bash 로 들어오면 스크립트 본문 자체가 stdin 입니다. 뒤에서
+#    docker compose exec 같이 stdin 을 읽는 명령이 돌면 아직 읽지 않은
+#    본문을 통째로 삼켜버리고, bash 는 EOF 를 만나 종료 코드 0 으로 조용히
+#    끝납니다. 에러 한 줄 없이 중간에 멈추는 가장 나쁜 실패 방식이고
+#    실제로 겪었습니다 — DB 복원까지만 찍히고 색인 복원이 사라졌습니다.
+#    디스크의 사본으로 갈아타면 본문이 stdin 과 무관해집니다.
+#
+# 2) 재부팅 후 재개(resume 유닛)도 이 사본을 실행합니다.
+#
+# 사본은 매번 새로 받습니다. "없을 때만" 받으면 옛 사본이 계속 실행되어
+# 고친 내용이 영영 반영되지 않습니다.
+#
+# 이미 사본에서 실행 중이면(LEXAI_FROMFILE=1) 건드리지 않습니다. bash 는
+# 스크립트를 조금씩 읽어가므로, 실행 중인 파일을 덮어쓰면 남은 부분이
+# 깨집니다.
+# -----------------------------------------------------------
+if [ "${LEXAI_FROMFILE:-0}" != "1" ]; then
+    if curl -fsSL "$SELF_URL" -o "$DEPLOY_DIR/.deploy.sh.new"; then
+        mv "$DEPLOY_DIR/.deploy.sh.new" "$DEPLOY_DIR/deploy.sh"
+        chmod +x "$DEPLOY_DIR/deploy.sh"
+    else
+        rm -f "$DEPLOY_DIR/.deploy.sh.new"
+        [ -f "$DEPLOY_DIR/deploy.sh" ] || die "스크립트를 받지 못했습니다: $SELF_URL"
+        warn "최신본을 받지 못해 기존 사본을 씁니다"
+    fi
+
+    export LEXAI_FROMFILE=1
+    export BRANCH DEPLOY_DIR REGISTRY_PREFIX IMAGE_TAG INDEX_NAME SNAPSHOT_REPO
+    export SNAPSHOT_URI="${SNAPSHOT_URI:-}" SKIP_DRIVER="${SKIP_DRIVER:-0}"
+    exec bash "$DEPLOY_DIR/deploy.sh" "${@:-}" </dev/null
+fi
 
 
 # -----------------------------------------------------------
@@ -481,8 +512,9 @@ fi
 # -----------------------------------------------------------
 log "9. SQLite DB"
 db_users() {
+    # </dev/null 은 필수입니다 — docker compose exec 는 -T 여도 stdin 을 읽습니다.
     { compose exec -T tomcat sqlite3 /var/lib/lexai/lexai.db \
-        "SELECT COUNT(*) FROM users;" 2>/dev/null | tr -d '\r'; } || true
+        "SELECT COUNT(*) FROM users;" </dev/null 2>/dev/null | tr -d '\r'; } || true
 }
 
 if [ ! -f "$DEPLOY_DIR/deploy/lexai.db" ]; then
@@ -495,9 +527,12 @@ else
         compose cp "$DEPLOY_DIR/deploy/lexai.db" tomcat:/var/lib/lexai/lexai.db
         compose restart tomcat >/dev/null
         # 재시작 직후에는 아직 응답하지 않습니다.
+        # ★ [ ... ] && break 로 쓰면 안 됩니다. 테스트가 실패했을 때 AND 리스트가
+        #   비정상 종료 상태를 내고 set -e 가 스크립트를 죽입니다 — 대기가 정말
+        #   필요한 순간에만 터지는 종류의 버그입니다.
         for _ in $(seq 1 12); do
             users="$(db_users)"
-            [ "${users:-0}" -gt 0 ] 2>/dev/null && break
+            if [ "${users:-0}" -gt 0 ] 2>/dev/null; then break; fi
             sleep 5
         done
         if [ "${users:-0}" -gt 0 ] 2>/dev/null; then
@@ -518,7 +553,7 @@ fi
 log "10. 색인"
 os() {  # os <curl 인자...>
     $DOCKER compose -f docker-compose.yml -f docker-compose.registry.yml \
-        exec -T opensearch curl -sk -u "admin:${OS_PW}" "$@"
+        exec -T opensearch curl -sk -u "admin:${OS_PW}" "$@" </dev/null
 }
 OS_BASE="https://127.0.0.1:9200"
 
@@ -530,7 +565,7 @@ elif [ -z "$(ls -A "$DEPLOY_DIR/deploy/snapshots" 2>/dev/null)" ]; then
     # 떨어져 채팅이 에러가 나므로, 매핑만 갖춘 빈 색인을 만들어 둡니다 —
     # 서비스는 정상 동작하고 근거 문서만 0건이 됩니다.
     warn "스냅샷이 없습니다 — 빈 색인으로 진행합니다 (기동 검증 전용)"
-    if compose exec -T ai python -m indexing.index_builder; then
+    if compose exec -T ai python -m indexing.index_builder </dev/null; then
         ok "빈 색인 생성 (매핑만)"
     else
         warn "빈 색인 생성 실패 — 채팅이 에러가 날 수 있습니다 (docker compose logs ai)"
