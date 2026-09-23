@@ -133,16 +133,28 @@ if grep -q "^plugins.security.ssl.transport.pemcert_filepath" "$OS_YML"; then
     ok "보안 설정 이미 적용됨 — 건너뜀"
 else
     load_opensearch_creds
-    demo_tool="$OPENSEARCH_HOME/plugins/opensearch-security/tools/install_demo_configuration.sh"
-    if [ -x "$demo_tool" ]; then
-        OPENSEARCH_INITIAL_ADMIN_PASSWORD="$OPENSEARCH_PASSWORD" \
-            bash "$demo_tool" -y -i -s
-        ok "보안 데모 설정 적용"
-    else
-        warn "데모 설정 스크립트를 찾지 못했습니다: $demo_tool"
-        warn "아래를 한 번 수동 실행한 뒤 Ctrl+C 로 빠져나오세요:"
-        warn "  cd $OPENSEARCH_HOME && OPENSEARCH_INITIAL_ADMIN_PASSWORD='<비번>' ./opensearch-tar-install.sh"
-    fi
+
+    # ★ -x 로 판정하면 안 됩니다. tarball 에서 갓 풀린 스크립트에 실행 권한이
+    #   없을 수 있는데, 어차피 bash 로 호출하므로 존재 여부만 보면 됩니다.
+    #   경로도 배포판에 따라 달라질 수 있어 찾아서 씁니다.
+    demo_tool="$( { find "$OPENSEARCH_HOME/plugins/opensearch-security" \
+        -name 'install_demo_configuration.sh' -type f 2>/dev/null | head -1; } || true )"
+
+    [ -n "$demo_tool" ] || die "보안 데모 설정 스크립트를 찾지 못했습니다
+  찾아본 곳: $OPENSEARCH_HOME/plugins/opensearch-security
+  아래를 한 번 수동 실행한 뒤(인증서가 생기면) Ctrl+C 로 빠져나오세요:
+    cd $OPENSEARCH_HOME && OPENSEARCH_INITIAL_ADMIN_PASSWORD='<비번>' ./opensearch-tar-install.sh"
+
+    OPENSEARCH_INITIAL_ADMIN_PASSWORD="$OPENSEARCH_PASSWORD" \
+        bash "$demo_tool" -y -i -s
+
+    # ★ 적용됐는지 여기서 확인하고, 안 됐으면 멈춥니다.
+    #   예전에는 경고만 하고 진행해서, 60초 뒤 "기동 실패"라는 엉뚱한 자리에서
+    #   끝났습니다. 로그를 열어봐야 진짜 원인(SSL 설정 없음)이 보였습니다.
+    grep -q "^plugins.security.ssl.transport.pemcert_filepath" "$OS_YML" \
+        || die "보안 데모 설정이 적용되지 않았습니다 — 위 출력을 확인하세요.
+  이 상태로 기동하면 보안 플러그인이 SSL 설정을 못 찾아 노드가 죽습니다."
+    ok "보안 데모 설정 적용"
 fi
 
 
