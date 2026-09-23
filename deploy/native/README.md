@@ -10,12 +10,15 @@ Docker Compose 구성(`docker-compose.yml`)과 같은 저장소를 공유합니�
 
 | | Docker Compose | 네이티브 |
 | --- | --- | --- |
-| DB | MySQL 컨테이너 | **SQLite 파일** |
-| 캐시 | Redis 컨테이너 | 없음 (읽기 캐시라 없어도 동작) |
-| 리버스 프록시 | Caddy 컨테이너 | 없음 (프론트가 `/api` 프록시) |
+| DB | SQLite 파일 (`lexai_data` 볼륨) | **SQLite 파일** (`~/lexai-data`) |
 | 검색 | OpenSearch 컨테이너 | OpenSearch tarball |
-| LLM | Ollama 컨테이너 | Ollama systemd 서비스 |
-| 앱 | 컨테이너 3개 | 호스트 프로세스 3개 |
+| LLM | Ollama 컨테이너 (+ toolkit) | Ollama systemd 서비스 |
+| 앱 | 컨테이너 3개 | systemd 유닛 3개 |
+| 진입물 | `deploy/compose/deploy.sh` | `deploy/native/bootstrap.sh` |
+| 타겟에 필요한 것 | compose 정의 3개 + 이미지 | 저장소 소스 |
+
+MySQL · Redis · Caddy 는 2026-09 이관 검증에 맞춰 양쪽 모두에서 걷어냈습니다
+(각각 SQLite 파일 · 비활성화 · 프론트의 `/api` 프록시로 대체).
 
 ## 새 환경에 올릴 때 — 한 줄
 

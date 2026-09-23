@@ -9,6 +9,7 @@
 # 방식으로는 "이번엔 좀 느렸나?" 수준의 인상 비교밖에 안 남습니다.
 #
 # 환경 이름을 붙이려면: FORM=gcp-shell bash deploy/native/verify.sh
+# 반복 측정:             FORM=gcp-shell RUNS=5 bash deploy/native/verify.sh
 # ===========================================================
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -21,12 +22,29 @@ RESULTS="$RUN_DIR/results.csv"
 USER_NAME="${VERIFY_USER:-verify}"
 USER_PW="${VERIFY_PW:-Verify1234!}"
 
+# 웜 응답을 몇 번 잴지. 1회만 재면 "이번엔 좀 느렸나" 수준의 인상만 남습니다.
+# 계약이 요구하는 p50/p95 를 내려면 반복이 필요합니다.
+RUNS="${RUNS:-1}"
+
 PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); printf '\033[0;32m  PASS\033[0m %s\n' "$*"; }
 fail() { FAIL=$((FAIL+1)); printf '\033[0;31m  FAIL\033[0m %s\n' "$*"; }
 
 now_ms() { date +%s%3N; }
 secs()   { awk -v ms="$1" 'BEGIN{printf "%.1f", ms/1000}'; }
+
+# pct <백분위> <값...>  — 최근접 순위법. 표본이 적으면 p95 는 사실상
+# 최댓값이므로, 의미 있는 p95 를 보려면 RUNS 를 20 이상으로 두세요.
+pct() {
+    local p="$1"; shift
+    printf '%s\n' "$@" | sort -n | awk -v p="$p" '
+        {v[NR]=$1}
+        END {
+            if (NR==0) {print 0; exit}
+            i=int(p/100*NR+0.9999); if (i<1) i=1; if (i>NR) i=NR
+            print v[i]
+        }'
+}
 
 # 프론트를 통해 호출합니다. Tomcat 을 직접 치지 않는 이유는, 프론트의
 # /api 프록시까지 한 번에 검증하기 위해서입니다(브라우저와 같은 경로).
@@ -61,7 +79,7 @@ fi
 
 
 log "3. 채팅 (콜드)"
-COLD_MS=0; WARM_MS=0; SRC_COUNT=0
+COLD_MS=0; WARM_MS=0; P95_MS=0; SRC_COUNT=0
 if [ "$AUTH_OK" = "1" ]; then
     t0=$(now_ms)
     body=$(curl -s -X POST "$FRONT/api/chat" \
@@ -92,17 +110,32 @@ except Exception: print(0)' 2>/dev/null)
         fail "근거 문서 0건 — 색인 또는 k-NN 확인"
     fi
 
-    log "4. 채팅 (워밍업 후)"
-    t0=$(now_ms)
-    curl -s -o /dev/null -X POST "$FRONT/api/chat" \
-        -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
-        -d '{"question":"임대차 계약 갱신 거절 사유는?","lawCategory":null,"sessionId":null}'
-    WARM_MS=$(( $(now_ms) - t0 ))
+    log "4. 채팅 (워밍업 후 · ${RUNS}회)"
+    # 콜드 응답은 모델의 VRAM 로드가 섞여 기준선으로 쓸 수 없습니다.
+    # 여기서부터가 비교 가능한 수치입니다 — 이관 전후 동등성의 좌변이 됩니다.
+    samples=()
+    for i in $(seq 1 "$RUNS"); do
+        t0=$(now_ms)
+        curl -s -o /dev/null -X POST "$FRONT/api/chat" \
+            -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+            -d '{"question":"임대차 계약 갱신 거절 사유는?","lawCategory":null,"sessionId":null}'
+        ms=$(( $(now_ms) - t0 ))
+        samples+=("$ms")
+        [ "$RUNS" -gt 1 ] && printf '       %d/%d  %s초\n' "$i" "$RUNS" "$(secs "$ms")"
+    done
+
+    WARM_MS=$(pct 50 "${samples[@]}")
+    P95_MS=$(pct 95 "${samples[@]}")
+
     # 백엔드의 FastAPI 호출 타임아웃이 180초라 그 아래여야 의미가 있습니다.
-    if [ "$WARM_MS" -lt 180000 ]; then
-        pass "응답 $(secs "$WARM_MS")초"
+    if [ "$P95_MS" -lt 180000 ]; then
+        if [ "$RUNS" -gt 1 ]; then
+            pass "p50 $(secs "$WARM_MS")초 · p95 $(secs "$P95_MS")초 (${RUNS}회)"
+        else
+            pass "응답 $(secs "$WARM_MS")초"
+        fi
     else
-        fail "응답 $(secs "$WARM_MS")초 — 백엔드 타임아웃(180초) 초과 위험"
+        fail "p95 $(secs "$P95_MS")초 — 백엔드 타임아웃(180초) 초과 위험"
     fi
 else
     fail "인증 실패로 채팅 검증 건너뜀"
@@ -127,6 +160,31 @@ if [ -n "$LAST_TS" ] && [ "$DB_HOUR" != "$UTC_HOUR" ]; then
     pass "타임존 (마지막 기록 $LAST_TS)"
 else
     fail "시각이 UTC 로 기록된 듯합니다 ($LAST_TS) — TZ=Asia/Seoul 확인"
+fi
+
+# -----------------------------------------------------------
+# 참조 무결성
+#
+# SQLite 는 FK 가 커넥션마다 기본 OFF 라, 걸지 않으면 스키마의 FK 가
+# 선언만 되고 검사되지 않습니다. MySQL 에서 넘어오며 조용히 사라지기
+# 쉬운 성질이라 여기서 확인합니다 (root-context.xml 의 dataSourceProperties).
+#
+# 두 가지를 봅니다.
+#   1) 실제 데이터에 고아 행이 있는가 — 앱이 FK 없이 써왔다면 여기서 나옵니다
+#   2) 설정이 실제로 들어있는가      — 1) 은 데이터가 적으면 통과할 수 있어서
+# -----------------------------------------------------------
+orphans=$(sqlite3 "$DB_PATH" "PRAGMA foreign_keys=ON; PRAGMA foreign_key_check;" 2>/dev/null | grep -c . || true)
+# ★ grep -c 는 0건일 때도 "0" 을 출력하면서 종료코드 1 을 냅니다.
+#   || echo 0 을 붙이면 "0" 이 두 번 나와 뒤의 정수 비교가 깨집니다.
+fk_cfg=$( { grep -c 'key="foreign_keys">true' \
+    "$REPO_DIR/backend_spring/src/main/webapp/WEB-INF/spring/root-context.xml" 2>/dev/null; } || true )
+
+if [ "${orphans:-0}" -eq 0 ] && [ "${fk_cfg:-0}" -ge 1 ]; then
+    pass "참조 무결성 (고아 행 0 · FK 강제 설정됨)"
+elif [ "${orphans:-0}" -gt 0 ]; then
+    fail "고아 행 ${orphans}건 — FK 가 강제되지 않은 채 기록됐습니다"
+else
+    fail "root-context.xml 에 foreign_keys=true 가 없습니다 — FK 가 검사되지 않습니다"
 fi
 
 
@@ -166,9 +224,18 @@ fi
 # -----------------------------------------------------------
 # 결과 누적
 # -----------------------------------------------------------
-[ -f "$RESULTS" ] || echo "timestamp,form,pass,fail,cold_sec,warm_sec,sources,os_docs,db_msgs,result" > "$RESULTS"
+HEADER="timestamp,form,runs,pass,fail,cold_sec,p50_sec,p95_sec,sources,os_docs,db_msgs,result"
+
+# 열이 늘어난 뒤에도 옛 파일에 그대로 덧붙이면 칸이 밀려 읽을 수 없게 됩니다.
+# 헤더가 다르면 옛 파일을 비켜두고 새로 시작합니다.
+if [ -f "$RESULTS" ] && [ "$(head -1 "$RESULTS")" != "$HEADER" ]; then
+    mv "$RESULTS" "${RESULTS%.csv}-$(date +%Y%m%d-%H%M%S).csv"
+    warn "결과 형식이 바뀌어 이전 기록을 따로 보관했습니다"
+fi
+[ -f "$RESULTS" ] || echo "$HEADER" > "$RESULTS"
+
 VERDICT=$([ "$FAIL" -eq 0 ] && echo PASS || echo FAIL)
-echo "$(date '+%Y-%m-%d %H:%M:%S'),${FORM},${PASS},${FAIL},$(secs "$COLD_MS"),$(secs "$WARM_MS"),${SRC_COUNT},${OS_DOCS:-0},${DB_MSGS:-0},${VERDICT}" >> "$RESULTS"
+echo "$(date '+%Y-%m-%d %H:%M:%S'),${FORM},${RUNS},${PASS},${FAIL},$(secs "$COLD_MS"),$(secs "$WARM_MS"),$(secs "$P95_MS"),${SRC_COUNT},${OS_DOCS:-0},${DB_MSGS:-0},${VERDICT}" >> "$RESULTS"
 
 echo
 log "결과: ${PASS} PASS / ${FAIL} FAIL → ${VERDICT}"
