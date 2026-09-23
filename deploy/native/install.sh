@@ -23,10 +23,13 @@ missing=""
 for pkg in sqlite3 mvn java pigz; do
     command -v "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"
 done
+# python3 는 순정 Ubuntu 에도 있지만 venv/pip 모듈은 별도 패키지입니다.
+python3 -c 'import venv' >/dev/null 2>&1 || missing="$missing python3-venv"
+
 if [ -n "$missing" ]; then
     sudo apt-get update -qq
     # pigz — 이관 패키지 압축을 코어 수만큼 병렬로 돌립니다
-    sudo apt-get install -y sqlite3 openjdk-11-jdk maven pigz
+    sudo apt-get install -y sqlite3 openjdk-11-jdk maven pigz python3-venv python3-pip
 fi
 if ! command -v node >/dev/null 2>&1; then
     curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
@@ -209,14 +212,35 @@ if [ -d "$REPO_DIR/frontend" ]; then
     ok "frontend 의존성 설치"
 fi
 
-if [ ! -d "$REPO_DIR/ai/.venv" ]; then
-    warn "AI venv 가 없습니다: $REPO_DIR/ai/.venv"
-    warn "인덱싱에 쓰던 venv 를 재사용합니다. 없으면 아래로 만드세요:"
-    warn "  cd $REPO_DIR/ai && python3 -m venv .venv && source .venv/bin/activate"
-    warn "  pip install torch --index-url https://download.pytorch.org/whl/cu124"
-    warn "  pip install -r requirements_server.txt"
+# -----------------------------------------------------------
+# AI venv
+#
+# ★ 예전에는 "없으면 직접 만드세요" 경고만 했습니다. 색인을 만들던 VM 에는
+#   venv 가 이미 있어서 문제가 드러나지 않았지만, 순정 VM 에서는 여기를
+#   그냥 지나간 뒤 start.sh 가 없는 uvicorn 을 찾다 실패합니다.
+#   무인 기동이 목적이므로 직접 만듭니다.
+#
+# torch 는 CPU 빌드를 먼저 명시적으로 넣습니다 — 컨테이너(ai/Dockerfile)와
+# 같은 방식입니다. LLM 추론은 Ollama(GPU)가 담당하고 여기서 torch 가 쓰이는
+# 곳은 질문 1건 임베딩뿐이라 CPU 로 50ms 수준입니다. CUDA 빌드는 약 2.5GB
+# 더 크고, 두 형태의 응답 시간을 비교할 때 조건도 어긋납니다.
+# -----------------------------------------------------------
+VENV="$REPO_DIR/ai/.venv"
+if [ -x "$VENV/bin/uvicorn" ]; then
+    ok "AI venv 확인 ($("$VENV/bin/python" --version 2>&1 | cut -d' ' -f2))"
 else
-    ok "AI venv 확인"
+    if [ -d "$VENV" ]; then
+        warn "venv 가 있지만 uvicorn 이 없습니다 — 다시 만듭니다"
+        rm -rf "$VENV"
+    fi
+    log "   venv 생성 · 의존성 설치 (수 분 걸립니다)"
+    python3 -m venv "$VENV"
+    "$VENV/bin/pip" install --quiet --upgrade pip
+    "$VENV/bin/pip" install --quiet --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cpu torch==2.4.1
+    "$VENV/bin/pip" install --quiet --no-cache-dir -r "$REPO_DIR/ai/requirements_server.txt"
+    [ -x "$VENV/bin/uvicorn" ] || die "uvicorn 이 설치되지 않았습니다 — 위 오류를 확인하세요"
+    ok "AI venv 생성 ($("$VENV/bin/python" --version 2>&1 | cut -d' ' -f2))"
 fi
 
 

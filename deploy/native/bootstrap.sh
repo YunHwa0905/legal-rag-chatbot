@@ -275,11 +275,24 @@ else
     mkdir -p "$SNAPSHOT_DIR" "$DATA_DIR"
     tmp="$(mktemp -d)"
 
+    # ★ 순정 Ubuntu 이미지에는 클라우드 CLI 가 없습니다. AWS DL AMI 처럼
+    #   미리 깔려 있는 이미지에서만 동작하고 순정에서는 이 단계에서 바로
+    #   막히므로, 필요한 것만 그 자리에서 설치합니다. 이관 도구가 부르는
+    #   무인 실행이라 "직접 설치하세요" 로 끝내면 거기서 멈춥니다.
+    ensure_cli() {  # ensure_cli <명령> <apt 패키지> <설치 안내>
+        command -v "$1" >/dev/null 2>&1 && return 0
+        log "   $1 설치"
+        sudo apt-get update -qq
+        sudo apt-get install -y "$2" >/dev/null 2>&1 \
+            || die "$1 를 설치하지 못했습니다 — $3"
+        ok "$1 설치됨"
+    }
+
     fetch() {  # fetch <원본> <받을 파일>
         case "$1" in
-            s3://*)   command -v aws >/dev/null 2>&1 || die "aws CLI 가 필요합니다"
+            s3://*)   ensure_cli aws awscli "https://aws.amazon.com/cli/ 참고"
                       aws s3 cp "$1" "$2" --only-show-errors ;;
-            gs://*)   command -v gsutil >/dev/null 2>&1 || die "gsutil 이 필요합니다"
+            gs://*)   ensure_cli gsutil google-cloud-cli "https://cloud.google.com/sdk/docs/install 참고 (apt 저장소 등록 필요)"
                       gsutil -q cp "$1" "$2" ;;
             http*)    curl -fsSL "$1" -o "$2" ;;
             *)        cp "$1" "$2" ;;
