@@ -1,6 +1,11 @@
 # ===========================
 # 환경변수 (실제 비밀값)
 # ===========================
+# db.properties 는 기동 시점에 .env 로부터 생성됩니다
+# (컨테이너: docker-entrypoint.sh / Shell: deploy/native/start.sh).
+# 추적하면 기동할 때마다 작업 트리가 더러워져 pull 이 막히고,
+# 실제 시크릿이 이미지에 구워질 위험도 있습니다. 템플릿만 추적합니다.
+backend_spring/src/main/resources/db.properties
 .env
 .env.*
 !.env.example
