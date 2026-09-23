@@ -96,6 +96,13 @@ if [ "$free_kb" -lt "$raw_kb" ]; then
     warn "여유 공간이 부족할 수 있습니다"
     warn "  필요(최대) : $(numfmt --to=iec $((raw_kb * 1024)) 2>/dev/null || echo "${raw_kb}K")"
     warn "  여유       : $(numfmt --to=iec $((free_kb * 1024)) 2>/dev/null || echo "${free_kb}K")"
+
+    # 대개 범인은 이전 회차 패키지입니다. 지울 대상을 바로 보여 줍니다.
+    rmdir "$OUT_DIR" 2>/dev/null || true      # 이번 회차의 빈 디렉터리는 남기지 않습니다
+    if [ -d "$(dirname "$OUT_DIR")" ]; then
+        warn "  이전 패키지:"
+        du -sh "$(dirname "$OUT_DIR")"/* 2>/dev/null | sed 's/^/    /' >&2 || true
+    fi
     die "공간을 확보한 뒤 다시 실행하세요 (이전 패키지 삭제 · docker builder prune -af 등)"
 fi
 
