@@ -67,7 +67,12 @@ env_value() {
     [ -f "$REPO_DIR/.env" ] || die ".env 가 없습니다: $REPO_DIR/.env"
     # set -o pipefail 때문에 grep 이 못 찾으면 파이프라인이 실패로 잡힙니다.
     # 값이 없는 것은 호출한 쪽이 판단할 일이라 여기서는 빈 문자열을 돌려줍니다.
-    { grep "^${key}=" "$REPO_DIR/.env" | head -1 | cut -d= -f2- ; } || true
+    #
+    # ★ tail -1 입니다. 같은 키가 여러 번 있으면 마지막 값이 이깁니다 —
+    #   docker compose 가 .env 를 읽는 방식과 같게 맞춘 것입니다. head -1
+    #   이면 뒤에 덧붙인 값이 조용히 무시되어, 두 형태가 서로 다른 설정으로
+    #   도는 상황이 생깁니다(실제로 TEMPERATURE 에서 겪었습니다).
+    { grep "^${key}=" "$REPO_DIR/.env" | tail -1 | cut -d= -f2- ; } || true
 }
 
 # -----------------------------------------------------------
