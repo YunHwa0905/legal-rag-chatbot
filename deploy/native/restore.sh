@@ -169,6 +169,15 @@ else
         die "스냅샷 '${SNAPSHOT_NAME}' 의 상태가 SUCCESS 가 아닙니다: ${state:-없음}"
     fi
 
+    # ★ 빈 색인이 남아 있으면 복원이 막힙니다. OpenSearch 는 같은 이름의
+    #   열린 색인이 있으면 거부합니다(cannot restore index ... already exists).
+    #   ALLOW_EMPTY_INDEX 로 만들어둔 껍데기가 정확히 그 상태입니다.
+    #   문서가 들어 있는 색인은 위에서 이미 건너뛰므로 여기 오지 않습니다.
+    if os_curl -o /dev/null -w '%{http_code}' "$OS_BASE/${INDEX_NAME}" | grep -q 200; then
+        os_curl -X DELETE "$OS_BASE/${INDEX_NAME}" >/dev/null
+        ok "빈 색인 삭제 — 복원 자리를 비웁니다"
+    fi
+
     log "   복원 중 (수 분 걸립니다)"
     started=$(date +%s)
     os_curl -X POST "$OS_BASE/_snapshot/${SNAPSHOT_REPO}/${SNAPSHOT_NAME}/_restore?wait_for_completion=true" \
