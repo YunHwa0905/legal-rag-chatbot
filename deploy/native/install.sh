@@ -204,6 +204,45 @@ WantedBy=multi-user.target
 EOF
 }
 
+# -----------------------------------------------------------
+# OpenSearch 유닛
+#
+# 앱 3종과 달리 EnvironmentFile 을 쓰지 않습니다(기동 시점에 만들어지는데
+# OpenSearch 는 그보다 먼저 떠야 합니다). 대신 필요한 값을 직접 넣습니다.
+#
+# ★ LD_LIBRARY_PATH 가 핵심입니다. 없으면 노드는 정상 기동하고 BM25 도
+#   동작하는데, 벡터 검색이 들어오는 순간 k-NN 네이티브 라이브러리를 찾지
+#   못해 노드가 죽습니다. 기동 확인만으로는 안 잡히는 함정이라 실제로 겪었습니다.
+#
+# tarball 배포는 파일 로그를 쓰므로 journal 이 아니라 기존 로그 파일에
+# 붙입니다 — verify.sh 가 그 파일을 읽습니다.
+# -----------------------------------------------------------
+mkdir -p "$LOG_DIR"
+sudo tee "$SYSTEMD_DIR/lexai-opensearch.service" >/dev/null <<EOF
+[Unit]
+Description=LexAI OpenSearch ${OPENSEARCH_VERSION}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${RUN_USER}
+WorkingDirectory=${OPENSEARCH_HOME}
+Environment=OPENSEARCH_HOME=${OPENSEARCH_HOME}
+Environment=LD_LIBRARY_PATH=${OPENSEARCH_HOME}/plugins/opensearch-knn/lib
+ExecStart=${OPENSEARCH_HOME}/bin/opensearch
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=300
+LimitMEMLOCK=infinity
+LimitNOFILE=65536
+StandardOutput=append:${LOG_DIR}/opensearch.log
+StandardError=append:${LOG_DIR}/opensearch.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 write_unit "lexai-ai" \
     "LexAI AI server (FastAPI RAG)" \
     "$REPO_DIR/ai" \
@@ -222,7 +261,7 @@ write_unit "lexai-frontend" \
     "/usr/bin/node server.js"
 
 sudo systemctl daemon-reload
-ok "유닛 3종 등록 — $SYSTEMD_DIR/lexai-*.service"
+ok "유닛 4종 등록 — $SYSTEMD_DIR/lexai-*.service (opensearch 포함)"
 ok "환경변수 파일: $ENV_FILE (start.sh 가 생성)"
 
 

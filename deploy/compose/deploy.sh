@@ -188,11 +188,13 @@ fi
 # 1. 기본 도구
 # -----------------------------------------------------------
 log "1. 기본 도구"
+# ★ lspci 가 빠지면 안 됩니다 — 2절이 GPU 유무를 lspci 로 판정하는데,
+#   명령이 없으면 출력이 비어 "GPU 없음"으로 읽히고 드라이버 설치를 건너뜁니다.
 need=""
-for c in curl openssl; do command -v "$c" >/dev/null 2>&1 || need="$need $c"; done
+for c in curl openssl lspci; do command -v "$c" >/dev/null 2>&1 || need="$need $c"; done
 if [ -n "$need" ]; then
     sudo apt-get update -qq
-    sudo apt-get install -y curl openssl ca-certificates
+    sudo apt-get install -y curl openssl ca-certificates pciutils
 fi
 ok "배포 디렉터리: $DEPLOY_DIR"
 
@@ -347,7 +349,15 @@ fetch_raw() {  # fetch_raw <저장소 상대경로>
 fetch_raw "docker-compose.yml"
 fetch_raw "docker-compose.registry.yml"
 fetch_raw "deploy/schema.sqlite.sql"
-ok "파일 3개 수신 (브랜치 $BRANCH)"
+
+# 검증 스크립트도 함께 받습니다. 타겟에 저장소가 없으므로 네이티브의
+# verify.sh 를 쓸 수 없고, 같은 항목을 같은 형식으로 판정하는 전용본이
+# 필요합니다 — 두 형태의 수치를 한 CSV 에서 비교하기 위해서입니다.
+curl -fsSL "${RAW_BASE}/deploy/compose/verify.sh" -o "$DEPLOY_DIR/verify.sh" \
+    && chmod +x "$DEPLOY_DIR/verify.sh" \
+    || warn "verify.sh 를 받지 못했습니다 — 자동 판정은 건너뜁니다"
+
+ok "파일 4개 수신 (브랜치 $BRANCH)"
 
 
 # -----------------------------------------------------------
@@ -607,12 +617,28 @@ fi
 # -----------------------------------------------------------
 # 9. 헬스체크
 # -----------------------------------------------------------
-log "11. 확인"
-code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1/" || echo 000)
-[ "$code" = "200" ] && ok "프론트엔드 HTTP $code" || warn "프론트엔드 HTTP $code (기대 200)"
+log "11. 검증"
+# 네이티브의 up.sh 와 같은 자리입니다 — 기동 다음에 합격 기준을 자동
+# 판정하고 결과를 CSV 로 누적합니다. 두 형태를 같은 기준으로 비교하려면
+# 이 단계가 양쪽에 다 있어야 합니다.
+VERIFY_RESULT="건너뜀"
+if [ -f "$DEPLOY_DIR/verify.sh" ]; then
+    if FORM="${FORM:-docker-compose}" RUNS="${RUNS:-1}" \
+       ALLOW_EMPTY_INDEX="${ALLOW_EMPTY_INDEX:-$([ -z "${SNAPSHOT_URI:-}" ] && echo 1 || echo 0)}" \
+       bash "$DEPLOY_DIR/verify.sh"; then
+        VERIFY_RESULT="PASS"
+    else
+        VERIFY_RESULT="FAIL"
+    fi
+else
+    code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1/" || echo 000)
+    if [ "$code" = "200" ]; then ok "프론트엔드 HTTP $code"; else warn "프론트엔드 HTTP $code (기대 200)"; fi
+fi
 
 echo
 compose ps --format 'table {{.Service}}\t{{.Status}}'
+echo
+log "검증 결과: $VERIFY_RESULT"
 
 echo
 log "배포 완료: $DEPLOY_DIR"

@@ -125,11 +125,15 @@ RESUME_UNIT="lexai-bootstrap-resume"
 # 1. 기본 도구
 # -----------------------------------------------------------
 log "1. 기본 도구"
+# ★ lspci 가 빠지면 안 됩니다. 아래 4절이 GPU 유무를 lspci 로 판정하는데,
+#   명령이 없으면 출력이 비어 "GPU 없음"으로 읽히고 드라이버 설치를 조용히
+#   건너뜁니다. GPU 인스턴스에서 추론이 CPU 로 떨어지는데 메시지는
+#   "GPU 가 없는 인스턴스"라고 나오는, 원인 찾기 어려운 실패가 됩니다.
 need=""
-for c in git curl openssl; do command -v "$c" >/dev/null 2>&1 || need="$need $c"; done
+for c in git curl openssl lspci; do command -v "$c" >/dev/null 2>&1 || need="$need $c"; done
 if [ -n "$need" ]; then
     sudo apt-get update -qq
-    sudo apt-get install -y git curl openssl ca-certificates
+    sudo apt-get install -y git curl openssl ca-certificates pciutils
 fi
 ok "git $(git --version | cut -d' ' -f3)"
 

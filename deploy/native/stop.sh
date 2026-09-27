@@ -75,10 +75,11 @@ stop_unit() {  # stop_unit <유닛> <이름>
 want frontend && stop_unit lexai-frontend "Frontend"
 want tomcat   && stop_unit lexai-tomcat   "Tomcat"
 want ai       && stop_unit lexai-ai       "AI 서버"
-want opensearch && stop_pid "OpenSearch" "$PID_DIR/opensearch.pid"
-# 안전망: PID 파일 없이 떠 있는 경우입니다. 손으로 띄웠거나, start.sh 가
-# "포트가 이미 열려 있음"으로 판단해 건너뛰면 PID 파일이 만들어지지 않습니다.
-# 포트가 남아 있으면 다음 기동이 "이미 실행 중"으로 오판하므로 정리합니다.
+want opensearch && stop_unit lexai-opensearch "OpenSearch"
+# 예전 PID 방식으로 띄워둔 인스턴스가 남아 있을 수 있어 함께 정리합니다.
+want opensearch && stop_pid "OpenSearch(구 PID 방식)" "$PID_DIR/opensearch.pid"
+# 안전망: 유닛으로도 PID 파일로도 안 잡히는 경우입니다. 손으로 띄웠거나
+# 포트만 남은 상태인데, 그대로 두면 다음 기동이 "이미 실행 중"으로 오판합니다.
 if want opensearch && port_in_use "$OPENSEARCH_PORT"; then
     warn "OpenSearch 포트가 아직 열려 있어 프로세스를 직접 찾습니다"
     os_pid=$(pgrep -u "$(id -u)" -f "org.opensearch.bootstrap.OpenSearch" | head -1)

@@ -23,6 +23,25 @@ INDEX_NAME="${INDEX_NAME:-legal_documents}"
 mkdir -p "$OUT_DIR"
 
 
+# -----------------------------------------------------------
+# 무중지 확인
+#
+# 이 스크립트의 전제가 "서비스를 멈추지 않고 뜰 수 있다" 입니다.
+# 전제를 말로만 두지 않고 시작·끝에 실제로 확인합니다 — 스냅샷이 I/O 를
+# 크게 쓰는 구간이라 프론트가 밀려 죽는지를 보는 것이 요점입니다.
+# -----------------------------------------------------------
+front_code() {
+    curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+        "http://127.0.0.1:${FRONTEND_PORT}/" 2>/dev/null || echo 000
+}
+SERVING=0
+if [ "$(front_code)" = "200" ]; then
+    SERVING=1
+else
+    warn "프론트엔드가 응답하지 않습니다 — 무중지 여부는 확인하지 않습니다"
+fi
+
+
 log "1. OpenSearch 스냅샷"
 # -----------------------------------------------------------
 load_opensearch_creds
@@ -148,6 +167,16 @@ ok "checksums.sha256"
 
 snap_files=$(wc -l < "$SNAPSHOT_DIR/$MANIFEST_NAME")
 snap_bytes=$(awk -F'	' '{s+=$2} END {print s+0}' "$SNAPSHOT_DIR/$MANIFEST_NAME")
+
+if [ "$SERVING" = "1" ]; then
+    code="$(front_code)"
+    if [ "$code" = "200" ]; then
+        ok "무중지 확인 — 패키징 내내 프론트엔드 HTTP 200"
+    else
+        warn "패키징 중 프론트엔드가 HTTP ${code} 가 됐습니다 — 무중지가 아닙니다"
+    fi
+fi
+
 
 log "4. 매니페스트"
 # -----------------------------------------------------------

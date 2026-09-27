@@ -32,10 +32,12 @@ PID_DIR="$RUN_DIR/pids"
 # 부수 효과로 종료가 확실해집니다. mvn 은 JVM 을 자식으로 띄우는데,
 # systemd 는 cgroup 단위로 정리해서 자식이 남지 않습니다.
 # -----------------------------------------------------------
+# OpenSearch 도 유닛입니다. 예전에는 PID 파일로 띄웠는데, enable 이 없어
+# 재부팅하면 올라오지 않았고 이관 도구가 식별할 수도 없었습니다.
 SYSTEMD_DIR="/etc/systemd/system"
 ENV_DIR="${ENV_DIR:-/etc/lexai}"
 ENV_FILE="$ENV_DIR/lexai.env"
-UNITS="lexai-ai lexai-tomcat lexai-frontend"
+UNITS="lexai-opensearch lexai-ai lexai-tomcat lexai-frontend"
 
 # -----------------------------------------------------------
 # 포트
@@ -123,10 +125,16 @@ os_ready() {
 #   플러그인이 자기 라이브러리 경로를 넣지 못해서 생깁니다.
 #   BM25 만 쓰면 멀쩡히 돌기 때문에 기동 확인만으로는 절대 안 잡힙니다.
 # -----------------------------------------------------------
-export_knn_lib_path() {
-    local knn_lib="$OPENSEARCH_HOME/plugins/opensearch-knn/lib"
-    [ -d "$knn_lib" ] || die "k-NN 라이브러리 디렉터리가 없습니다: $knn_lib"
-    export LD_LIBRARY_PATH="${knn_lib}:${LD_LIBRARY_PATH:-}"
+#   지금은 lexai-opensearch 유닛의 Environment= 로 들어가 있습니다.
+#   유닛을 손볼 때 이 줄을 지우면 같은 증상이 돌아옵니다.
+#
+# 설치된 유닛에 실제로 들어갔는지 확인합니다. 유닛을 다시 만들거나 손으로
+# 고친 뒤 빠지는 일을 막기 위한 것입니다.
+check_knn_lib_path() {
+    local unit="$SYSTEMD_DIR/lexai-opensearch.service"
+    [ -f "$unit" ] || return 0
+    grep -q "LD_LIBRARY_PATH=.*opensearch-knn/lib" "$unit" \
+        || die "lexai-opensearch 유닛에 k-NN 라이브러리 경로가 없습니다 — install.sh 를 다시 실행하세요"
 }
 
 # -----------------------------------------------------------

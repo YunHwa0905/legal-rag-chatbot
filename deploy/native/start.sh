@@ -33,33 +33,52 @@ fi
 
 
 # -----------------------------------------------------------
-# OpenSearch
+# 유닛 기동
 #
-# ★ LD_LIBRARY_PATH 를 반드시 먼저 export 합니다. 없으면 기동은 되지만
-#   벡터 검색이 들어오는 순간 UnsatisfiedLinkError 로 노드가 죽습니다.
-#   BM25 만으로는 멀쩡해 보여서 기동 확인만으로는 안 잡히는 함정입니다.
+# OpenSearch 를 포함해 넷 다 systemd 로 돌립니다. 예전에는 OpenSearch 만
+# PID 파일로 띄웠는데, enable 이 없어 재부팅하면 올라오지 않았습니다.
+#
+# k-NN 라이브러리 경로는 유닛의 Environment= 에 들어 있습니다(common.sh
+# 의 check_knn_lib_path 가 매 기동마다 확인). 없으면 기동은 되는데 벡터
+# 검색이 들어오는 순간 노드가 죽습니다.
 # -----------------------------------------------------------
+# start_unit <유닛> <이름> <준비완료 판정 명령...>
+start_unit() {
+    local unit="$1" label="$2"; shift 2
+    log "$label"
+    [ -f "$SYSTEMD_DIR/${unit}.service" ] || die "유닛이 없습니다 — install.sh 를 먼저 실행하세요"
+
+    # ★ enable 이 없으면 재부팅 후 서비스가 올라오지 않습니다. 유닛 파일에
+    #   [Install] 이 있어도 심볼릭 링크를 만들어야 부팅 시 기동됩니다.
+    #   이미 실행 중이어도 걸어둡니다 — 나중에 재부팅할 때를 대비합니다.
+    sudo systemctl enable "$unit" >/dev/null 2>&1 || true
+
+    if systemctl is-active --quiet "$unit"; then
+        ok "이미 실행 중"
+        return
+    fi
+    sudo systemctl start "$unit"
+    if ! wait_for "$label" 300 "$@"; then
+        sudo systemctl status "$unit" --no-pager -l | tail -15
+        die "기동 실패 — journalctl -u ${unit} -n 50"
+    fi
+    ok "기동 (systemd: ${unit})"
+}
+
 if want opensearch; then
-    log "OpenSearch"
+    load_opensearch_creds
+    check_knn_lib_path
     if port_in_use "$OPENSEARCH_PORT"; then
+        log "OpenSearch"
         ok "이미 실행 중 (포트 ${OPENSEARCH_PORT})"
+        sudo systemctl enable lexai-opensearch >/dev/null 2>&1 || true
     else
-        export_knn_lib_path
-        (
-            cd "$OPENSEARCH_HOME"
-            ./bin/opensearch -d -p "$PID_DIR/opensearch.pid" \
-                > "$LOG_DIR/opensearch.log" 2>&1
-        )
-        load_opensearch_creds
-        if ! wait_for "OpenSearch" 180 os_curl "$OS_BASE/_cluster/health"; then
-            die "기동 실패 — $LOG_DIR/opensearch.log 확인"
-        fi
+        start_unit lexai-opensearch "OpenSearch" os_curl "$OS_BASE/_cluster/health"
         # 샤드 복구까지 기다립니다. 응답만 보고 넘어가면 다음 단계의 _count 가
         # 빈 값을 받아 "색인 없음"으로 오판합니다.
         if ! wait_for "샤드 복구" 180 os_ready; then
             warn "클러스터 상태가 yellow/green 이 아닙니다 — 색인 조회가 실패할 수 있습니다"
         fi
-        ok "기동 (PID $(cat "$PID_DIR/opensearch.pid" 2>/dev/null || echo '?'))"
     fi
 fi
 
@@ -124,24 +143,6 @@ redis.port=6379
 jwt.secret=${jwt}
 jwt.expiration=$(env_value JWT_EXPIRATION || echo 86400000)
 EOF
-}
-
-# start_unit <유닛> <설명> <준비완료 판정 명령...>
-start_unit() {
-    local unit="$1" label="$2"; shift 2
-    log "$label"
-    [ -f "$SYSTEMD_DIR/${unit}.service" ] || die "유닛이 없습니다 — install.sh 를 먼저 실행하세요"
-
-    if systemctl is-active --quiet "$unit"; then
-        ok "이미 실행 중"
-        return
-    fi
-    sudo systemctl start "$unit"
-    if ! wait_for "$label" 300 "$@"; then
-        sudo systemctl status "$unit" --no-pager -l | tail -15
-        die "기동 실패 — journalctl -u ${unit} -n 50"
-    fi
-    ok "기동 (systemd: ${unit})"
 }
 
 if want ai || want tomcat || want frontend; then
