@@ -34,6 +34,33 @@ PID_DIR="$RUN_DIR/pids"
 # -----------------------------------------------------------
 # OpenSearch 도 유닛입니다. 예전에는 PID 파일로 띄웠는데, enable 이 없어
 # 재부팅하면 올라오지 않았고 이관 도구가 식별할 수도 없었습니다.
+# -----------------------------------------------------------
+# 무인 apt
+#
+# ★ sudo 는 환경변수를 지웁니다(env_reset). 스크립트 맨 위에서
+#   export DEBIAN_FRONTEND=noninteractive 를 해도 `sudo apt-get` 에는
+#   전달되지 않아, 지금까지 사실상 무력했습니다. 호출마다 직접 넘깁니다.
+#
+# ★ needrestart 는 debconf 가 아니라 별도 도구라 DEBIAN_FRONTEND 로
+#   막히지 않습니다. 커널이 올라가면 "Pending kernel upgrade" 대화상자를
+#   띄우는데, 무인 실행에서는 거기서 영원히 멈춥니다. 실제로 겪었습니다.
+# -----------------------------------------------------------
+apt_q() {
+    sudo DEBIAN_FRONTEND=noninteractive \
+         NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 \
+         apt-get "$@"
+}
+
+# ollama 설치 스크립트나 nodesource 처럼 남이 부르는 apt 도 있어서,
+# 호출을 고치는 것만으로는 부족합니다. 설정 파일로 한 번 막아둡니다.
+silence_needrestart() {
+    [ -d /etc/needrestart ] || return 0
+    [ -f /etc/needrestart/conf.d/99-lexai.conf ] && return 0
+    sudo mkdir -p /etc/needrestart/conf.d
+    printf '$nrconf{restart} = "a";\n$nrconf{kernelhints} = -1;\n' \
+        | sudo tee /etc/needrestart/conf.d/99-lexai.conf >/dev/null
+}
+
 SYSTEMD_DIR="/etc/systemd/system"
 ENV_DIR="${ENV_DIR:-/etc/lexai}"
 ENV_FILE="$ENV_DIR/lexai.env"

@@ -31,8 +31,35 @@
 
 set -euo pipefail
 
+# -----------------------------------------------------------
+# 무인 apt
+#
 # 이관 도구(postCommands)는 대화형이 아니므로 apt 가 질문을 던지면 멈춥니다.
+#
+# ★ export 만으로는 부족합니다. sudo 가 환경변수를 지우기 때문에(env_reset)
+#   `sudo apt-get` 에는 이 값이 전달되지 않습니다. 호출마다 직접 넘깁니다.
+#
+# ★ needrestart 는 debconf 가 아니라 별도 도구라 DEBIAN_FRONTEND 로 막히지
+#   않습니다. 커널이 올라가면 "Pending kernel upgrade" 대화상자를 띄우고,
+#   무인 실행은 거기서 영원히 멈춥니다. 실제로 겪었습니다.
+# -----------------------------------------------------------
 export DEBIAN_FRONTEND=noninteractive
+
+apt_q() {
+    sudo DEBIAN_FRONTEND=noninteractive \
+         NEEDRESTART_MODE=a NEEDRESTART_SUSPEND=1 \
+         apt-get "$@"
+}
+
+# ollama 설치 스크립트나 nodesource 처럼 남이 부르는 apt 도 있어서,
+# 호출을 고치는 것만으로는 부족합니다. 설정 파일로 한 번 막아둡니다.
+silence_needrestart() {
+    [ -d /etc/needrestart ] || return 0
+    [ -f /etc/needrestart/conf.d/99-lexai.conf ] && return 0
+    sudo mkdir -p /etc/needrestart/conf.d
+    printf '$nrconf{restart} = "a";\n$nrconf{kernelhints} = -1;\n' \
+        | sudo tee /etc/needrestart/conf.d/99-lexai.conf >/dev/null
+}
 
 REPO_URL="${REPO_URL:-https://github.com/YunHwa0905/legal-rag-chatbot.git}"
 BRANCH="${BRANCH:-feat/sqlite}"
@@ -90,8 +117,8 @@ if [ "$(id -u)" -eq 0 ] && [ "${LEXAI_REEXEC:-0}" != "1" ]; then
     log "root 로 실행되었습니다 — ${_user} 사용자로 이어서 진행합니다"
 
     if ! command -v git >/dev/null 2>&1; then
-        apt-get update -qq
-        apt-get install -y git curl openssl ca-certificates
+        DEBIAN_FRONTEND=noninteractive apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y git curl openssl ca-certificates
     fi
 
     # 재실행할 스크립트가 디스크에 있어야 합니다. curl | bash 로 들어온 경우
@@ -125,6 +152,7 @@ RESUME_UNIT="lexai-bootstrap-resume"
 # 1. 기본 도구
 # -----------------------------------------------------------
 log "1. 기본 도구"
+silence_needrestart
 # ★ lspci 가 빠지면 안 됩니다. 아래 4절이 GPU 유무를 lspci 로 판정하는데,
 #   명령이 없으면 출력이 비어 "GPU 없음"으로 읽히고 드라이버 설치를 조용히
 #   건너뜁니다. GPU 인스턴스에서 추론이 CPU 로 떨어지는데 메시지는
@@ -132,8 +160,8 @@ log "1. 기본 도구"
 need=""
 for c in git curl openssl lspci; do command -v "$c" >/dev/null 2>&1 || need="$need $c"; done
 if [ -n "$need" ]; then
-    sudo apt-get update -qq
-    sudo apt-get install -y git curl openssl ca-certificates pciutils
+    apt_q update -qq
+    apt_q install -y git curl openssl ca-certificates pciutils
 fi
 ok "git $(git --version | cut -d' ' -f3)"
 
@@ -223,8 +251,8 @@ elif ! lspci 2>/dev/null | grep -qi nvidia; then
     warn "채팅이 실패할 수 있으니 .env 의 MAX_NEW_TOKENS 를 낮추세요."
 else
     log "   드라이버가 없어 설치합니다 (설치 후 자동 재부팅)"
-    sudo apt-get update -qq
-    sudo apt-get install -y ubuntu-drivers-common
+    apt_q update -qq
+    apt_q install -y ubuntu-drivers-common
     sudo ubuntu-drivers install --gpgpu || sudo ubuntu-drivers autoinstall
 
     # 재부팅 후 이어서 실행할 유닛을 등록합니다.
@@ -290,8 +318,8 @@ else
     ensure_cli() {  # ensure_cli <명령> <apt 패키지> <설치 안내>
         command -v "$1" >/dev/null 2>&1 && return 0
         log "   $1 설치"
-        sudo apt-get update -qq
-        sudo apt-get install -y "$2" >/dev/null 2>&1 \
+        apt_q update -qq
+        apt_q install -y "$2" >/dev/null 2>&1 \
             || die "$1 를 설치하지 못했습니다 — $3"
         ok "$1 설치됨"
     }

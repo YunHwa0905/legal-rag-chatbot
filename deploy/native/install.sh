@@ -17,6 +17,8 @@ OPENSEARCH_TARBALL="opensearch-${OPENSEARCH_VERSION}-linux-x64.tar.gz"
 OPENSEARCH_URL="https://artifacts.opensearch.org/releases/bundle/opensearch/${OPENSEARCH_VERSION}/${OPENSEARCH_TARBALL}"
 OPENSEARCH_HEAP="${OPENSEARCH_HEAP:-2g}"
 
+silence_needrestart
+
 log "1. 런타임 패키지"
 # -----------------------------------------------------------
 missing=""
@@ -27,13 +29,13 @@ done
 python3 -c 'import venv' >/dev/null 2>&1 || missing="$missing python3-venv"
 
 if [ -n "$missing" ]; then
-    sudo apt-get update -qq
+    apt_q update -qq
     # pigz — 이관 패키지 압축을 코어 수만큼 병렬로 돌립니다
-    sudo apt-get install -y sqlite3 openjdk-11-jdk maven pigz python3-venv python3-pip
+    apt_q install -y sqlite3 openjdk-11-jdk maven pigz python3-venv python3-pip
 fi
 if ! command -v node >/dev/null 2>&1; then
     curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-    sudo apt-get install -y nodejs
+    apt_q install -y nodejs
 fi
 ok "sqlite3 $(sqlite3 --version | cut -d' ' -f1) / node $(node --version) / maven $(mvn -v 2>/dev/null | head -1 | cut -d' ' -f3)"
 
