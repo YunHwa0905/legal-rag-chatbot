@@ -123,6 +123,10 @@ except Exception: print(0)' 2>/dev/null)
 
     if [ "${ANSWER_LEN:-0}" -gt 50 ]; then
         pass "답변 생성 ($(secs "$COLD_MS")초, ${ANSWER_LEN}자)"
+    elif [ "$ALLOW_EMPTY_INDEX" = "1" ]; then
+        # 근거 문서가 하나도 없으면 RAG 가 답을 만들 수 없습니다. 색인이
+        # 비어 있는 게 전제인 기동 검증에서는 예상된 결과입니다.
+        warn "답변 없음 ($(secs "$COLD_MS")초) — 빈 색인이라 예상된 결과입니다 (ALLOW_EMPTY_INDEX=1)"
     else
         fail "답변 없음 ($(secs "$COLD_MS")초) — docker compose logs ai"
     fi
@@ -155,7 +159,10 @@ except Exception: print(0)' 2>/dev/null)
     P95_MS=$(pct 95 "${samples[@]}")
 
     # 백엔드의 FastAPI 호출 타임아웃이 180초라 그 아래여야 의미가 있습니다.
-    if [ "$P95_MS" -lt 180000 ]; then
+    if [ "$ALLOW_EMPTY_INDEX" = "1" ]; then
+        # 색인이 비면 검색도 생성도 하지 않으므로 이 숫자는 기준선이 아닙니다.
+        warn "응답 $(secs "$WARM_MS")초 — 빈 색인이라 기준선으로 쓸 수 없습니다"
+    elif [ "$P95_MS" -lt 180000 ]; then
         if [ "$RUNS" -gt 1 ]; then
             pass "p50 $(secs "$WARM_MS")초 · p95 $(secs "$P95_MS")초 (${RUNS}회)"
         else
