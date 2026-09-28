@@ -76,6 +76,38 @@ silence_needrestart() {
         | sudo tee /etc/needrestart/conf.d/99-lexai.conf >/dev/null
 }
 
+
+# -----------------------------------------------------------
+# GPU 판정
+#
+# ★ nvidia-smi 하나로 판단하면 안 됩니다. ubuntu-drivers 가 설치하는
+#   headless 변형에는 그 명령이 없습니다(nvidia-utils 패키지에 들어 있습니다).
+#   드라이버가 멀쩡히 올라와도 "없음" 으로 읽히고, 그러면 설치와 재부팅을
+#   무한 반복합니다. 커널 모듈 존재도 함께 봅니다.
+# -----------------------------------------------------------
+gpu_ready() {
+    nvidia-smi >/dev/null 2>&1 && return 0
+    [ -e /proc/driver/nvidia/version ]
+}
+
+ensure_nvidia_smi() {
+    command -v nvidia-smi >/dev/null 2>&1 && return 0
+    local drv
+    drv=$( { dpkg -l 2>/dev/null \
+        | awk '$1=="ii" && $2 ~ /^nvidia-(headless|driver)-/ {print $2}' \
+        | grep -oE '[0-9]{3}' | sort -u | tail -1; } || true )
+    [ -n "$drv" ] || return 0
+    log "   nvidia-smi 가 없어 nvidia-utils-${drv} 를 설치합니다"
+    apt_q install -y "nvidia-utils-${drv}-server" >/dev/null 2>&1 \
+        || apt_q install -y "nvidia-utils-${drv}" >/dev/null 2>&1 || true
+}
+
+gpu_desc() {
+    nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null | head -1 \
+        || head -1 /proc/driver/nvidia/version 2>/dev/null \
+        || echo "드라이버 확인됨"
+}
+
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/YunHwa0905/legal-rag-chatbot}"
 BRANCH="${BRANCH:-feat/sqlite}"
 RAW_BASE="${REPO_RAW}/${BRANCH}"
@@ -83,6 +115,8 @@ SELF_URL="${RAW_BASE}/deploy/compose/deploy.sh"
 
 DEPLOY_DIR="${DEPLOY_DIR:-$HOME/lexai-compose}"
 RESUME_UNIT="lexai-compose-resume"
+DRIVER_TRIES_FILE="$HOME/.lexai-driver-tries"
+DRIVER_MAX_TRIES="${DRIVER_MAX_TRIES:-2}"
 # ★ 네이티브(bootstrap.sh)는 ~/.lexai-secrets 를 씁니다. 같은 이름을 쓰면
 #   한 호스트에서 두 형태를 오갈 때 먼저 받은 쪽 시크릿이 덮여 사라집니다.
 #   형태별 VM 을 권장하지만 실제로 겹치는 일이 생겨 이름을 나눕니다.
@@ -236,17 +270,35 @@ ok "배포 디렉터리: $DEPLOY_DIR"
 log "2. GPU 드라이버"
 if [ "${SKIP_DRIVER:-0}" = "1" ]; then
     ok "SKIP_DRIVER=1 — 건너뜀"
-elif nvidia-smi >/dev/null 2>&1; then
-    ok "$(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader | head -1)"
+elif gpu_ready; then
+    ensure_nvidia_smi
+    rm -f "$DRIVER_TRIES_FILE"
+    ok "$(gpu_desc)"
 elif ! lspci 2>/dev/null | grep -qi nvidia; then
     warn "NVIDIA GPU 가 없는 인스턴스입니다 — 드라이버 설치를 건너뜁니다"
     warn "추론이 CPU 로 떨어져 응답이 1~3분이 됩니다. 백엔드 타임아웃이 180초라"
     warn "채팅이 실패할 수 있으니 .env 의 MAX_NEW_TOKENS 를 낮추세요."
 else
-    log "   드라이버가 없어 설치합니다 (설치 후 자동 재부팅)"
+    # ★ 설치가 먹히지 않으면 이 분기가 매 부팅마다 다시 돌아 무한히
+    #   재부팅합니다. 무인 실행에서는 아무도 모르는 채로 VM 만 계속 돕니다.
+    tries=$( { cat "$DRIVER_TRIES_FILE" 2>/dev/null; } || echo 0 )
+    tries=$(( ${tries:-0} + 1 ))
+    echo "$tries" > "$DRIVER_TRIES_FILE"
+
+    if [ "$tries" -gt "$DRIVER_MAX_TRIES" ]; then
+        sudo systemctl disable "$RESUME_UNIT" >/dev/null 2>&1 || true
+        die "드라이버 설치를 ${DRIVER_MAX_TRIES}회 시도했는데도 GPU 를 인식하지 못합니다.
+  무한 재부팅을 막기 위해 멈춥니다(재개 유닛 해제 완료).
+  확인: cat /proc/driver/nvidia/version · lsmod | grep nvidia · sudo dmesg | grep -i nvidia
+  모듈은 있는데 nvidia-smi 만 없다면: sudo apt-get install -y nvidia-utils-<버전>-server
+  다시 시도하려면: rm $DRIVER_TRIES_FILE"
+    fi
+
+    log "   드라이버가 없어 설치합니다 (${tries}/${DRIVER_MAX_TRIES}회차 · 설치 후 자동 재부팅)"
     apt_q update -qq
     apt_q install -y ubuntu-drivers-common
     sudo ubuntu-drivers install --gpgpu || sudo ubuntu-drivers autoinstall
+    ensure_nvidia_smi
 
     sudo tee "/etc/systemd/system/${RESUME_UNIT}.service" >/dev/null <<EOF
 [Unit]
