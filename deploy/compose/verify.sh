@@ -22,6 +22,12 @@
 set -uo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ★ 네이티브 검증(common.sh 가 TZ=Asia/Seoul 을 export)과 같은 시간대로
+#   기록해야 한 표에서 행 순서가 맞습니다. 섞이면 9시간 차이로 뒤집혀
+#   어느 회차가 먼저인지 읽을 수 없게 됩니다.
+export TZ="${TZ:-$( { grep -E '^TZ=' .env 2>/dev/null | tail -1 | cut -d= -f2-; } || true )}"
+export TZ="${TZ:-Asia/Seoul}"
+
 FORM="${FORM:-docker-compose}"
 RUNS="${RUNS:-1}"
 ALLOW_EMPTY_INDEX="${ALLOW_EMPTY_INDEX:-0}"
@@ -239,7 +245,12 @@ for svc in ai tomcat frontend opensearch; do
     logs=$(compose logs --no-color --since 1h "$svc" 2>/dev/null)
     # DEBUG 로그에 error='null' 같은 문자열이 흔해서 단순 grep 은 오탐이
     # 심합니다. 실제 문제 패턴만 셉니다.
-    n=$(printf '%s' "$logs" | grep -cE "Traceback \(most recent|^Caused by:|Exception in thread|\bERROR\b|\bSEVERE\b")
+    # ★ "Not yet initialized" 는 OpenSearch 기동 창에서 매번 나옵니다.
+    #   보안 플러그인이 초기화 전에 들어온 요청을 거절하는 것이고 곧 사라집니다.
+    #   항상 뜨는 경고를 남겨두면 진짜 경고까지 흘려보게 되므로 제외합니다.
+    n=$( { printf '%s' "$logs" \
+        | grep -E "Traceback \(most recent|^Caused by:|Exception in thread|\bERROR\b|\bSEVERE\b" \
+        | grep -vc "Not yet initialized"; } || true )
     if [ "${n:-0}" -gt 0 ]; then
         warn "${svc} 에 에러 흔적 ${n}건 — docker compose logs ${svc}"
         errs=$((errs + n))

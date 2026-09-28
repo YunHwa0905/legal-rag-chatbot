@@ -237,7 +237,12 @@ done
 
 # OpenSearch 는 tarball 배포라 파일 로그를 씁니다.
 if [ -f "$LOG_DIR/opensearch.log" ]; then
-    n=$(grep -cE "^\[.*\]\[ERROR|Exception in thread" "$LOG_DIR/opensearch.log" 2>/dev/null)
+    # ★ "Not yet initialized" 는 기동 창에서 매번 나옵니다. 보안 플러그인이
+    #   자기 설정을 초기화하기 전에 들어온 요청을 거절하는 것이고, 초기화가
+    #   끝나면 사라집니다. 항상 뜨는 경고를 남겨두면 나중에 진짜 경고까지
+    #   흘려보게 되므로 이 한 줄만 제외합니다.
+    n=$( { grep -E "^\[.*\]\[ERROR|Exception in thread" "$LOG_DIR/opensearch.log" 2>/dev/null \
+        | grep -vc "Not yet initialized"; } || true )
     if [ "${n:-0}" -gt 0 ]; then
         warn "opensearch.log 에 에러 흔적 ${n}건"
         errs=$((errs + n))
