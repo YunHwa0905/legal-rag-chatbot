@@ -435,7 +435,13 @@ curl -fsSL "${RAW_BASE}/deploy/compose/verify.sh" -o "$DEPLOY_DIR/verify.sh" \
     && chmod +x "$DEPLOY_DIR/verify.sh" \
     || warn "verify.sh 를 받지 못했습니다 — 자동 판정은 건너뜁니다"
 
-ok "파일 4개 수신 (브랜치 $BRANCH)"
+# 이 형태가 이관의 소스가 되는 경우를 위해 패키지 생성 스크립트도 함께
+# 받습니다. 없으면 컴포즈로 운영 중인 환경에서 패키지를 뜰 수단이 없습니다.
+curl -fsSL "${RAW_BASE}/deploy/compose/backup.sh" -o "$DEPLOY_DIR/backup.sh" \
+    && chmod +x "$DEPLOY_DIR/backup.sh" \
+    || warn "backup.sh 를 받지 못했습니다 — 이 형태에서 패키지를 뜰 수 없습니다"
+
+ok "파일 5개 수신 (브랜치 $BRANCH)"
 
 
 # -----------------------------------------------------------
