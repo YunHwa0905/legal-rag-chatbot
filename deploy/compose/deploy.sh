@@ -687,15 +687,34 @@ else
         ok "빈 색인 삭제 — 복원 자리를 비웁니다"
     fi
 
+    # ★ 복원은 스냅샷 크기만큼 디스크를 더 씁니다. 부족하면 도중에 멈추고
+    #   red 상태의 빈 색인만 남는데, 그게 다음 재시도까지 막습니다
+    #   (already exists). 실제로 겪었으니 미리 확인합니다.
+    need_kb=$(du -sk "$DEPLOY_DIR/deploy/snapshots" | cut -f1)
+    free_kb=$(df -Pk /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ -n "$free_kb" ] && [ "$free_kb" -lt "$need_kb" ]; then
+        warn "여유 공간이 부족할 수 있습니다"
+        warn "  필요(최대) : $(numfmt --to=iec $((need_kb * 1024)) 2>/dev/null || echo "${need_kb}K")"
+        warn "  여유       : $(numfmt --to=iec $((free_kb * 1024)) 2>/dev/null || echo "${free_kb}K")"
+        die "공간을 확보한 뒤 다시 실행하세요 (docker image prune -af · 옛 패키지 삭제 등)"
+    fi
+
     log "   복원 중: $snap (수 분 걸립니다)"
     started=$(date +%s)
-    os -X POST "$OS_BASE/_snapshot/${SNAPSHOT_REPO}/${snap}/_restore?wait_for_completion=true" \
+    # ★ 응답을 버리면 안 됩니다. 실패해도 "색인이 비어 있습니다" 라는
+    #   결과만 보이고 진짜 이유(공간 부족·권한·이름 충돌)가 사라집니다.
+    resp=$(os -X POST "$OS_BASE/_snapshot/${SNAPSHOT_REPO}/${snap}/_restore?wait_for_completion=true" \
         -H 'Content-Type: application/json' \
-        -d "{\"indices\":\"${INDEX_NAME}\"}" >/dev/null
+        -d "{\"indices\":\"${INDEX_NAME}\"}")
     elapsed=$(( $(date +%s) - started ))
 
+    if printf '%s' "$resp" | grep -q '"error"'; then
+        warn "복원 API 오류:"
+        printf '%s\n' "$resp" | head -c 700 >&2; echo >&2
+    fi
+
     count=$( { os "$OS_BASE/${INDEX_NAME}/_count" | grep -o '"count":[0-9]*' | cut -d: -f2; } || true )
-    [ "${count:-0}" -gt 0 ] || die "복원 후에도 색인이 비어 있습니다"
+    [ "${count:-0}" -gt 0 ] || die "복원 후에도 색인이 비어 있습니다 (위 응답과 df -h 를 확인하세요)"
     ok "복원 완료 — ${count}건 (${elapsed}초)"
 fi
 
