@@ -214,7 +214,13 @@ except Exception: print(0)' 2>/dev/null)
     P95_MS=$(pct 95 "${samples[@]}")
 
     # 백엔드의 FastAPI 호출 타임아웃이 180초라 그 아래여야 의미가 있습니다.
-    if [ "$ALLOW_EMPTY_INDEX" = "1" ]; then
+    #
+    # ★ 플래그만 보면 안 됩니다. deploy.sh 는 SNAPSHOT_URI 를 안 주면 색인이
+    #   비어 있을 것으로 보고 ALLOW_EMPTY_INDEX=1 을 넘기는데, 이미 데이터가
+    #   있는 환경에 다시 배포하면 그 가정이 틀립니다. 실제로 같은 실행에서
+    #   「색인 253,207건 PASS」와 「빈 색인이라 기준선으로 쓸 수 없습니다」가
+    #   같이 나왔습니다. 근거 문서가 실제로 0건일 때만 빈 색인으로 봅니다.
+    if [ "$ALLOW_EMPTY_INDEX" = "1" ] && [ "${SRC_COUNT:-0}" -le 0 ]; then
         # 색인이 비면 검색도 생성도 하지 않으므로 이 숫자는 기준선이 아닙니다.
         warn "응답 $(secs "$WARM_MS")초 — 빈 색인이라 기준선으로 쓸 수 없습니다"
     elif [ "$P95_MS" -lt 180000 ]; then
@@ -229,7 +235,7 @@ except Exception: print(0)' 2>/dev/null)
 
     # 같은 질문에 같은 답이 나오는지. 결정적 설정이 실제로 걸렸는지는
     # 설정을 읽어서가 아니라 결과로 확인해야 합니다.
-    if [ "$ALLOW_EMPTY_INDEX" = "1" ]; then
+    if [ "$ALLOW_EMPTY_INDEX" = "1" ] && [ "${SRC_COUNT:-0}" -le 0 ]; then
         :   # 색인이 비면 생성 자체를 하지 않으므로 판정 대상이 아닙니다.
     elif [ "$RUNS" -le 1 ]; then
         warn "응답 재현성은 RUNS 를 2 이상으로 둬야 판정됩니다"

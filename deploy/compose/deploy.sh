@@ -499,9 +499,15 @@ OPENSEARCH_HEAP=2g
 # SQLite 가 datetime('now','localtime') 으로 기록하므로 반드시 필요합니다.
 TZ=Asia/Seoul
 
-# 이관 전후 동등성 비교용. 평소 운영은 TEMPERATURE=0.1 · LLM_SEED=-1.
-TEMPERATURE=0.1
-LLM_SEED=-1
+# 이관 전후 동등성 비교용. 진입물에서 넘긴 값이 그대로 들어옵니다.
+#   TEMPERATURE=0 LLM_SEED=42 ... bash   → 결정적 (답변 비교 가능)
+# 평소 운영 기본값은 0.1 · -1 입니다.
+#
+# ★ 전에는 이 두 줄에 0.1 · -1 을 하드코딩해서, 진입물에 결정적 설정을
+#   줘도 조용히 무시됐습니다. 문서마다 그 값을 주라고 적어뒀는데 정작
+#   컴포즈 쪽은 받지 않고 있었고, 같은 질문에 매번 다른 답이 나왔습니다.
+TEMPERATURE=${TEMPERATURE:-0.1}
+LLM_SEED=${LLM_SEED:--1}
 
 REGISTRY_PREFIX=$REGISTRY_PREFIX
 IMAGE_TAG=$IMAGE_TAG
