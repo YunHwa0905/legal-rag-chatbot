@@ -168,8 +168,14 @@ except Exception: print(0)' 2>/dev/null)
 
     # 근거 문서가 0건이면 색인이 비었거나 벡터 검색이 죽은 것입니다.
     # 응답 자체는 200 으로 오기 때문에 이 항목이 없으면 놓칩니다.
+    #
+    # ★ -1 과 0 은 다릅니다. -1 은 응답을 JSON 으로 읽지도 못한 것이라
+    #   색인 문제가 아니라 서비스가 아직 안 떴거나 오류를 돌려준 것입니다.
+    #   둘을 같은 메시지로 묶으면 엉뚱한 곳을 보게 됩니다.
     if [ "${SRC_COUNT:-0}" -gt 0 ]; then
         pass "근거 문서 ${SRC_COUNT}건 (RAG 동작)"
+    elif [ "${SRC_COUNT:-0}" -lt 0 ]; then
+        fail "응답을 읽지 못했습니다 — 서비스가 아직 뜨지 않았거나 오류 응답입니다 ($LOG_DIR/ai.log)"
     elif [ "$ALLOW_EMPTY_INDEX" = "1" ]; then
         warn "근거 문서 0건 — 빈 색인이라 예상된 결과입니다 (ALLOW_EMPTY_INDEX=1)"
     else
