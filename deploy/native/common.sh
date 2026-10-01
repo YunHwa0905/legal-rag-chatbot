@@ -143,6 +143,17 @@ os_ready() {
     [ "$st" = "yellow" ] || [ "$st" = "green" ]
 }
 
+# 클러스터가 통째로 green 이어도 특정 색인의 샤드는 아직 복구 중일 수 있습니다.
+# 색인 단위로 한 번 더 기다립니다 — OpenSearch 가 서버 쪽에서 막아 주는
+# API 라 폴링보다 정확합니다. 색인이 아예 없으면 408/404 로 떨어지므로
+# 호출한 쪽이 그대로 판단하면 됩니다.
+os_wait_index() {
+    local idx="${1:-${INDEX_NAME:-legal_documents}}" secs="${2:-120}"
+    os_curl -s -o /dev/null -w '%{http_code}' \
+        "$OS_BASE/_cluster/health/${idx}?wait_for_status=yellow&timeout=${secs}s" 2>/dev/null \
+        | grep -q '^200$'
+}
+
 # -----------------------------------------------------------
 # k-NN 네이티브 라이브러리 경로
 #

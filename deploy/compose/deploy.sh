@@ -399,6 +399,31 @@ if nvidia-smi >/dev/null 2>&1; then
     else
         die "컨테이너가 GPU 를 보지 못합니다 — toolkit 설정을 확인하세요 (docker info | grep -i nvidia)"
     fi
+
+    # -----------------------------------------------------------
+    # 호스트 Ollama 가 떠 있으면 GPU 를 이중으로 잡습니다.
+    #
+    # 네이티브 형태를 내릴 때 stop.sh 를 인자 없이 부르면 ollama.service 는
+    # 남습니다 — 모델 5GB 재적재 비용 때문에 의도된 기본값입니다. 그 상태로
+    # 컴포즈를 띄우면 호스트와 컨테이너가 같은 모델을 각자 올려 VRAM 이
+    # 정확히 두 배가 되고, 측정값이 조용히 오염됩니다. 실제로 겪었습니다 —
+    # 5,331 MiB 가 10,659 MiB 로 찍히고 콜드가 2배, p95 편차가 4배였습니다.
+    #
+    # GPU 메모리가 작은 인스턴스에서는 오염이 아니라 기동 실패가 됩니다.
+    # 다른 사전 조건(드라이버 · 디스크 · 컨테이너 GPU 통과)은 전부 스스로
+    # 확인하면서 이것만 빠져 있었습니다.
+    # -----------------------------------------------------------
+    if systemctl is-active --quiet ollama 2>/dev/null; then
+        used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)
+        if [ "${ALLOW_HOST_OLLAMA:-0}" = "1" ]; then
+            warn "호스트 ollama.service 가 떠 있습니다 (GPU ${used:-?} MiB) — ALLOW_HOST_OLLAMA=1 로 진행합니다"
+        else
+            die "호스트 ollama.service 가 떠 있습니다 (GPU ${used:-?} MiB 사용 중).
+         컨테이너 Ollama 와 모델을 각자 올려 VRAM 이 두 배가 되고 측정값이 오염됩니다.
+         내리고 다시 실행하세요:  bash deploy/native/stop.sh all-with-ollama
+         의도한 것이라면:         ALLOW_HOST_OLLAMA=1 로 다시 실행"
+        fi
+    fi
 else
     warn "호스트에 GPU 가 없어 컨테이너 GPU 검증을 건너뜁니다"
 fi
@@ -554,6 +579,19 @@ else
     # 없으면 빈 DB 로 시작하는데, 그러면 기존 계정으로 로그인이 안 되어
     # 이관 전후 동등성 확인의 첫 단계가 막힙니다.
     if fetch "${SNAPSHOT_URI%/}/lexai.db" "$DEPLOY_DIR/deploy/lexai.db" 2>/dev/null; then
+        # ★ 체크섬 파일에는 DB 해시도 들어 있는데 위에서 아카이브 줄만 골라
+        #   검사하고 있었습니다. 같은 망 안에서 복사할 때는 드러나지 않지만,
+        #   오브젝트 스토리지나 HTTP 로 받으면 잘린 DB 가 그대로 들어가고
+        #   SQLite 는 한참 뒤에 알아보기 어려운 형태로 실패합니다.
+        #   (체크섬 파일은 $tmp, DB 는 배포 디렉터리에 있어 경로를 맞춥니다)
+        if [ -f "$tmp/checksums.sha256" ] && grep -qE '[[:space:]]lexai\.db$' "$tmp/checksums.sha256"; then
+            if ( cd "$DEPLOY_DIR/deploy" \
+                 && grep -E '[[:space:]]lexai\.db$' "$tmp/checksums.sha256" | sha256sum -c --quiet ); then
+                ok "DB 체크섬 확인"
+            else
+                die "DB 체크섬 불일치 — 전송이 온전하지 않습니다"
+            fi
+        fi
         ok "DB 내려받음 ($(du -h "$DEPLOY_DIR/deploy/lexai.db" | cut -f1))"
     else
         warn "패키지에 lexai.db 가 없습니다 — 빈 DB 로 시작합니다"

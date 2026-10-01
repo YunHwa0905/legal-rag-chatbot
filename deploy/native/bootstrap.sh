@@ -422,6 +422,17 @@ else
     ok "색인 스냅샷 배치 ($(du -sh "$SNAPSHOT_DIR" | cut -f1))"
 
     if fetch "${SNAPSHOT_URI%/}/lexai.db" "$tmp/lexai.db" 2>/dev/null; then
+        # ★ 체크섬 파일에는 DB 해시도 들어 있는데 위에서 아카이브 줄만 골라
+        #   검사하고 있었습니다. 같은 망 안에서 복사할 때는 드러나지 않지만,
+        #   오브젝트 스토리지나 HTTP 로 받으면 잘린 DB 가 그대로 들어가고
+        #   SQLite 는 한참 뒤에 알아보기 어려운 형태로 실패합니다.
+        if [ -f "$tmp/checksums.sha256" ] && grep -qE '[[:space:]]lexai\.db$' "$tmp/checksums.sha256"; then
+            if ( cd "$tmp" && grep -E '[[:space:]]lexai\.db$' checksums.sha256 | sha256sum -c --quiet ); then
+                ok "DB 체크섬 확인"
+            else
+                die "DB 체크섬 불일치 — 전송이 온전하지 않습니다"
+            fi
+        fi
         cp "$tmp/lexai.db" "$DATA_DIR/lexai.db"
         ok "DB 배치 ($(du -h "$DATA_DIR/lexai.db" | cut -f1))"
     else

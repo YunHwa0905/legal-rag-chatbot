@@ -54,6 +54,57 @@ pct() {
 # /api 프록시까지 한 번에 검증하기 위해서입니다(브라우저와 같은 경로).
 FRONT="http://127.0.0.1:${FRONTEND_PORT}"
 
+# -----------------------------------------------------------
+# 추론 결과 비교
+#
+# 계약은 이관 전후의 "추론 결과 일치"를 요구하는데, 지금까지는 응답을
+# -o /dev/null 로 버려서 비교할 원본이 남지 않았습니다. 응답 시간만 재고
+# 내용은 흘려보내고 있었던 셈입니다.
+#
+# 두 가지를 남깁니다.
+#   1) 콜드 응답 본문과 근거 문서를 파일로      → 환경 간 대조용 (top-k 포함)
+#   2) 웜 응답의 답변 해시를 회차마다           → 같은 환경 안에서의 재현성
+#
+# 2) 가 필요한 이유는, 결정적 설정(TEMPERATURE=0 · 시드 고정)이 실제로
+# 걸려 있는지 설정 파일만 봐서는 알 수 없기 때문입니다. 같은 질문에 매번
+# 다른 답이 나오면 이관 전후 비교 자체가 성립하지 않습니다.
+# -----------------------------------------------------------
+COLD_Q="전세 보증금을 돌려받지 못하면 어떻게 해야 하나요?"
+WARM_Q="임대차 계약 갱신 거절 사유는?"
+ANSWER_DIR="$RUN_DIR/answers"
+ANSWER_SHA="-"
+ANSWER_UNIQ=0
+
+# ★ json.load(sys.stdin) 을 쓰면 안 됩니다. stdin 을 플랫폼 기본 인코딩으로
+#   읽기 때문에, 로케일이 C 인 환경에서는 한글 답변이 통째로 깨집니다
+#   (UnicodeDecodeError 로 조용히 "-" 가 됩니다). 바이트로 받아 UTF-8 로
+#   명시해서 해석합니다. 기존 토큰 파싱은 값이 ASCII 라 드러나지 않았습니다.
+
+# answer_hash <응답본문> — answer 만 뽑아 앞 12자리 해시. 못 읽으면 "-".
+answer_hash() {
+    printf '%s' "$1" | python3 -c 'import sys,json,hashlib
+try: a = json.loads(sys.stdin.buffer.read().decode("utf-8")).get("answer") or ""
+except Exception: a = ""
+print(hashlib.sha256(a.encode("utf-8")).hexdigest()[:12] if a else "-")' 2>/dev/null \
+        || printf '%s' "-"
+}
+
+# save_answer <파일> <질문> <응답본문>
+save_answer() {
+    mkdir -p "$ANSWER_DIR"
+    printf '%s' "$3" | python3 -c 'import sys,json,hashlib
+out, form, q = sys.argv[1], sys.argv[2], sys.argv[3]
+try: d = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+except Exception: d = {}
+a = d.get("answer") or ""
+rec = {"form": form, "question": q, "answer": a,
+       "answer_sha256": hashlib.sha256(a.encode("utf-8")).hexdigest(),
+       "source_count": len(d.get("sources") or []),
+       "sources": d.get("sources") or []}
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(rec, f, ensure_ascii=False, indent=2)' "$1" "$FORM" "$2" 2>/dev/null || true
+}
+
 
 log "1. 프론트엔드"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$FRONT/")
@@ -88,8 +139,13 @@ if [ "$AUTH_OK" = "1" ]; then
     t0=$(now_ms)
     body=$(curl -s -X POST "$FRONT/api/chat" \
         -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
-        -d '{"question":"전세 보증금을 돌려받지 못하면 어떻게 해야 하나요?","lawCategory":null,"sessionId":null}')
+        -d "$(printf '{"question":"%s","lawCategory":null,"sessionId":null}' "$COLD_Q")")
     COLD_MS=$(( $(now_ms) - t0 ))
+
+    # 환경 간 대조용으로 본문과 근거 문서를 통째로 남깁니다.
+    ANSWER_SHA=$(answer_hash "$body")
+    ANSWER_FILE="$ANSWER_DIR/${FORM}-$(date +%Y%m%d-%H%M%S)-cold.json"
+    save_answer "$ANSWER_FILE" "$COLD_Q" "$body"
 
     SRC_COUNT=$(printf '%s' "$body" | python3 -c 'import sys,json
 try:
@@ -123,14 +179,16 @@ except Exception: print(0)' 2>/dev/null)
     log "4. 채팅 (워밍업 후 · ${RUNS}회)"
     # 콜드 응답은 모델의 VRAM 로드가 섞여 기준선으로 쓸 수 없습니다.
     # 여기서부터가 비교 가능한 수치입니다 — 이관 전후 동등성의 좌변이 됩니다.
-    samples=()
+    samples=(); warm_hashes=()
     for i in $(seq 1 "$RUNS"); do
         t0=$(now_ms)
-        curl -s -o /dev/null -X POST "$FRONT/api/chat" \
+        # ★ 응답을 버리지 않습니다. 내용을 비교하려면 본문이 있어야 합니다.
+        wbody=$(curl -s -X POST "$FRONT/api/chat" \
             -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
-            -d '{"question":"임대차 계약 갱신 거절 사유는?","lawCategory":null,"sessionId":null}'
+            -d "$(printf '{"question":"%s","lawCategory":null,"sessionId":null}' "$WARM_Q")")
         ms=$(( $(now_ms) - t0 ))
         samples+=("$ms")
+        warm_hashes+=("$(answer_hash "$wbody")")
         [ "$RUNS" -gt 1 ] && printf '       %d/%d  %s초\n' "$i" "$RUNS" "$(secs "$ms")"
     done
 
@@ -151,6 +209,23 @@ except Exception: print(0)' 2>/dev/null)
     else
         fail "p95 $(secs "$P95_MS")초 — 백엔드 타임아웃(180초) 초과 위험"
     fi
+
+    # 같은 질문에 같은 답이 나오는지. 결정적 설정이 실제로 걸렸는지는
+    # 설정을 읽어서가 아니라 결과로 확인해야 합니다.
+    if [ "$ALLOW_EMPTY_INDEX" = "1" ]; then
+        :   # 색인이 비면 생성 자체를 하지 않으므로 판정 대상이 아닙니다.
+    elif [ "$RUNS" -le 1 ]; then
+        warn "응답 재현성은 RUNS 를 2 이상으로 둬야 판정됩니다"
+    else
+        ANSWER_UNIQ=$(printf '%s\n' "${warm_hashes[@]}" | sort -u | wc -l)
+        if [ "${warm_hashes[0]}" = "-" ]; then
+            fail "응답을 읽지 못해 재현성을 판정하지 못했습니다"
+        elif [ "$ANSWER_UNIQ" -eq 1 ]; then
+            pass "응답 재현성 — ${RUNS}회 모두 동일 (${warm_hashes[0]})"
+        else
+            fail "응답 재현성 — ${RUNS}회 중 서로 다른 답변 ${ANSWER_UNIQ}종. 결정적 설정(TEMPERATURE=0 · LLM_SEED) 이 걸려 있는지 확인하세요"
+        fi
+    fi
 else
     fail "인증 실패로 채팅 검증 건너뜀"
 fi
@@ -158,6 +233,16 @@ fi
 
 log "5. 데이터"
 load_opensearch_creds
+
+# ★ 노드가 응답하는 것과 색인을 읽을 수 있는 것은 다릅니다. 재부팅 직후에는
+#   _cluster/health 가 200 을 주면서도 샤드 복구가 끝나지 않아 _count 가 0 을
+#   돌려줍니다. restore.sh 에는 이 대기가 있는데 판정 쪽에만 빠져 있어,
+#   멀쩡한 이관이 FAIL 로 보고됐습니다 (2026-09-28 실측 · 7 PASS / 3 FAIL).
+if ! wait_for "클러스터 준비" "${OS_WAIT:-120}" os_ready; then
+    warn "클러스터가 ${OS_WAIT:-120}초 안에 준비되지 않았습니다 — 아래 수치는 신뢰할 수 없습니다"
+fi
+os_wait_index "${INDEX_NAME:-legal_documents}" "${OS_WAIT:-120}" || true
+
 OS_DOCS=$(os_curl "$OS_BASE/${INDEX_NAME:-legal_documents}/_count" | grep -o '"count":[0-9]*' | cut -d: -f2)
 if [ "${OS_DOCS:-0}" -gt 0 ]; then
     pass "OpenSearch ${OS_DOCS}건"
@@ -235,16 +320,43 @@ for unit in lexai-ai lexai-tomcat lexai-frontend; do
     fi
 done
 
-# OpenSearch 는 tarball 배포라 파일 로그를 씁니다.
+# OpenSearch 는 tarball 배포라 journal 이 아니라 파일 로그를 씁니다.
+#
+# ★ 위의 앱 로그는 서비스 기동 시점 이후만 보는데 여기만 그 필터가 없어서,
+#   한 번 기록된 에러가 이후 모든 회차에서 영구히 경고로 남았습니다.
+#   실제로 09-28 재부팅 때의 일회성 에러 5건이 이틀 뒤 판정까지 따라왔고,
+#   같은 시점에 컴포즈 쪽은 10 PASS, 네이티브는 9 PASS 로 갈렸습니다.
+#
+# ★ 시간대 주의. 이 로그는 UTC 로 찍는데 systemd 의 ActiveEnterTimestamp 는
+#   로컬(KST)입니다. 그대로 비교하면 9시간이 어긋나 필터가 무의미해집니다 —
+#   커밋 4a3deb5 에서 겪은 것과 같은 함정이라 UTC 로 변환해서 넘깁니다.
+#   로그가 로컬 시각으로 찍히는 환경이면 OPENSEARCH_LOG_TZ=local 로 바꾸세요.
 if [ -f "$LOG_DIR/opensearch.log" ]; then
-    # ★ "Not yet initialized" 는 기동 창에서 매번 나옵니다. 보안 플러그인이
-    #   자기 설정을 초기화하기 전에 들어온 요청을 거절하는 것이고, 초기화가
-    #   끝나면 사라집니다. 항상 뜨는 경고를 남겨두면 나중에 진짜 경고까지
-    #   흘려보게 되므로 이 한 줄만 제외합니다.
-    n=$( { grep -E "^\[.*\]\[ERROR|Exception in thread" "$LOG_DIR/opensearch.log" 2>/dev/null \
-        | grep -vc "Not yet initialized"; } || true )
+    os_since=$(systemctl show -p ActiveEnterTimestamp --value lexai-opensearch 2>/dev/null)
+    if [ "${OPENSEARCH_LOG_TZ:-utc}" = "local" ]; then
+        since_fmt=$(date -d "$os_since" +'%Y-%m-%dT%H:%M:%S' 2>/dev/null)
+    else
+        since_fmt=$(date -d "$os_since" -u +'%Y-%m-%dT%H:%M:%S' 2>/dev/null)
+    fi
+
+    if [ -n "${since_fmt:-}" ]; then
+        # 줄머리의 ISO 타임스탬프를 문자열로 비교합니다(ISO 라 사전순 = 시간순).
+        # 스택 트레이스처럼 타임스탬프가 없는 줄은 직전 줄의 판정을 따릅니다.
+        n=$(awk -v since="$since_fmt" '
+            /^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/ {
+                after = (substr($0, 2, 19) >= since) ? 1 : 0
+            }
+            after && (/^\[.*\]\[ERROR/ || /Exception in thread/) && !/Not yet initialized/ { c++ }
+            END { print c+0 }' "$LOG_DIR/opensearch.log" 2>/dev/null)
+    else
+        # 기동 시각을 못 읽으면 전체를 봅니다 — 놓치는 것보다 낫습니다.
+        warn "lexai-opensearch 기동 시각을 읽지 못해 로그 전체를 확인합니다"
+        n=$( { grep -E "^\[.*\]\[ERROR|Exception in thread" "$LOG_DIR/opensearch.log" 2>/dev/null \
+            | grep -vc "Not yet initialized"; } || true )
+    fi
+
     if [ "${n:-0}" -gt 0 ]; then
-        warn "opensearch.log 에 에러 흔적 ${n}건"
+        warn "opensearch.log 에 에러 흔적 ${n}건 (기동 ${os_since:-?} 이후)"
         errs=$((errs + n))
     fi
 fi
@@ -255,7 +367,9 @@ fi
 # -----------------------------------------------------------
 # 결과 누적
 # -----------------------------------------------------------
-HEADER="timestamp,form,runs,pass,fail,cold_sec,p50_sec,p95_sec,sources,os_docs,db_msgs,result"
+# answer_sha  콜드 응답 본문의 해시 — 이관 전후 이 값이 같으면 같은 답입니다.
+# answer_uniq 웜 응답 중 서로 다른 답변의 수 — 1 이어야 결정적입니다.
+HEADER="timestamp,form,runs,pass,fail,cold_sec,p50_sec,p95_sec,sources,os_docs,db_msgs,answer_sha,answer_uniq,result"
 
 # 열이 늘어난 뒤에도 옛 파일에 그대로 덧붙이면 칸이 밀려 읽을 수 없게 됩니다.
 # 헤더가 다르면 옛 파일을 비켜두고 새로 시작합니다.
@@ -266,11 +380,12 @@ fi
 [ -f "$RESULTS" ] || echo "$HEADER" > "$RESULTS"
 
 VERDICT=$([ "$FAIL" -eq 0 ] && echo PASS || echo FAIL)
-echo "$(date '+%Y-%m-%d %H:%M:%S'),${FORM},${RUNS},${PASS},${FAIL},$(secs "$COLD_MS"),$(secs "$WARM_MS"),$(secs "$P95_MS"),${SRC_COUNT},${OS_DOCS:-0},${DB_MSGS:-0},${VERDICT}" >> "$RESULTS"
+echo "$(date '+%Y-%m-%d %H:%M:%S'),${FORM},${RUNS},${PASS},${FAIL},$(secs "$COLD_MS"),$(secs "$WARM_MS"),$(secs "$P95_MS"),${SRC_COUNT},${OS_DOCS:-0},${DB_MSGS:-0},${ANSWER_SHA},${ANSWER_UNIQ},${VERDICT}" >> "$RESULTS"
 
 echo
 log "결과: ${PASS} PASS / ${FAIL} FAIL → ${VERDICT}"
 echo "  누적 기록: $RESULTS"
+[ -n "${ANSWER_FILE:-}" ] && echo "  응답 보존: $ANSWER_FILE"
 column -s, -t "$RESULTS" 2>/dev/null | tail -5
 
 [ "$FAIL" -eq 0 ]
