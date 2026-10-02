@@ -343,9 +343,27 @@ log "6. 로그 에러"
 # 섞이면 안 되기 때문입니다.
 errs=0
 for svc in ai tomcat frontend opensearch; do
-    since=$(compose ps --format '{{.Service}} {{.RunningFor}}' 2>/dev/null | awk -v s="$svc" '$1==s {print}')
-    [ -n "$since" ] || continue
-    logs=$(compose logs --no-color --since 1h "$svc" 2>/dev/null)
+    cid=$(compose ps -q "$svc" 2>/dev/null | head -1)
+    [ -n "$cid" ] || continue
+
+    # ★ 전에는 --since 1h 로 임의의 1시간 창을 봤습니다. 그러면 재부팅 전
+    #   종료 로그가 다음 판정에 섞입니다 — 실제로 Tomcat 종료 경고와 AI 의
+    #   CancelledError 가 재기동 후 판정에 잡혀, 같은 상태인데 6 PASS 와
+    #   5 PASS 로 갈렸습니다.
+    #
+    #   네이티브는 ActiveEnterTimestamp 로 기동 시점 이후만 봅니다(D-007 조치).
+    #   컴포즈도 컨테이너 기동 시각을 쓰게 맞춥니다 — 두 형태의 판정 기준이
+    #   다르면 수치를 나란히 놓을 수 없습니다.
+    #
+    #   StartedAt 은 UTC(RFC3339)로 나옵니다. 나노초까지 주는데 --since 가
+    #   받기 쉽도록 초 단위로 자릅니다.
+    started=$($DOCKER inspect -f '{{.State.StartedAt}}' "$cid" 2>/dev/null | cut -c1-19)
+    if [ -n "$started" ]; then
+        logs=$(compose logs --no-color --since "${started}Z" "$svc" 2>/dev/null)
+    else
+        warn "${svc} 기동 시각을 읽지 못해 최근 1시간을 확인합니다"
+        logs=$(compose logs --no-color --since 1h "$svc" 2>/dev/null)
+    fi
     # DEBUG 로그에 error='null' 같은 문자열이 흔해서 단순 grep 은 오탐이
     # 심합니다. 실제 문제 패턴만 셉니다.
     # ★ "Not yet initialized" 는 OpenSearch 기동 창에서 매번 나옵니다.
