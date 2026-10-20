@@ -159,10 +159,33 @@ msgs=$(sqlite3 "$OUT_DIR/lexai.db" "SELECT COUNT(*) FROM chat_message;")
 ok "$(du -h "$OUT_DIR/lexai.db" | cut -f1) — 사용자 ${users} · 메시지 ${msgs}"
 
 
-log "3. 체크섬"
-# 전송 중 손상을 대상 환경에서 곧바로 잡기 위한 아카이브 단위 해시입니다.
+log "3. 소스 커밋"
+# -----------------------------------------------------------
+# 저장소 디렉터리를 통째로 옮기는 이관(Beetle 데이터 마이그레이션 등)에서는
+# 대상 VM 이 GitHub 에서 새로 받지 않고 옮겨온 소스를 그대로 씁니다
+# (bootstrap.sh NO_UPDATE=1). 옮겨온 소스가 이 패키지를 만든 시점의 소스와
+# 같은지 대상에서 대조할 수 있도록 전체 해시를 남기고 체크섬에도 넣습니다.
+#
+# ★ 커밋 해시는 커밋되지 않은 수정을 담지 못합니다. 그래서 추적 파일에
+#   수정이 있으면 경고합니다. 실행 권한(chmod +x) 변경은 bootstrap 이 매번
+#   하므로 core.fileMode=false 로 무시합니다.
+# -----------------------------------------------------------
+commit_full="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null)" \
+    || die "저장소 커밋을 읽지 못했습니다: $REPO_DIR"
+echo "$commit_full" > "$OUT_DIR/source-commit.txt"
+
+dirty="$(git -C "$REPO_DIR" -c core.fileMode=false status --porcelain --untracked-files=no 2>/dev/null || true)"
+if [ -n "$dirty" ]; then
+    warn "커밋되지 않은 수정이 있습니다 — 커밋 해시만으로는 소스 동일성을 보장하지 못합니다"
+    printf '%s\n' "$dirty" | sed 's/^/    /' >&2
+fi
+ok "${commit_full:0:7} ($(git -C "$REPO_DIR" branch --show-current 2>/dev/null || echo '-'))"
+
+
+log "4. 체크섬"
+# 전송 중 손상을 대상 환경에서 곧바로 잡기 위한 파일 단위 해시입니다.
 # (압축을 푼 뒤의 내용 대조는 tar 안의 목록 파일이 담당합니다)
-( cd "$OUT_DIR" && sha256sum opensearch-snapshots.tar.gz lexai.db > checksums.sha256 )
+( cd "$OUT_DIR" && sha256sum opensearch-snapshots.tar.gz lexai.db source-commit.txt > checksums.sha256 )
 ok "checksums.sha256"
 
 snap_files=$(wc -l < "$SNAPSHOT_DIR/$MANIFEST_NAME")
@@ -178,19 +201,20 @@ if [ "$SERVING" = "1" ]; then
 fi
 
 
-log "4. 매니페스트"
+log "5. 매니페스트"
 # -----------------------------------------------------------
 cat > "$OUT_DIR/MANIFEST.txt" <<EOF
 LexAI 이관 패키지
 생성 시각   : $(date '+%Y-%m-%d %H:%M:%S %Z')
 생성 호스트 : $(hostname)
-저장소 커밋 : $(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo '불명') ($(git -C "$REPO_DIR" branch --show-current 2>/dev/null || echo '-'))
+저장소 커밋 : ${commit_full} ($(git -C "$REPO_DIR" branch --show-current 2>/dev/null || echo '-'))
 
 내용
   opensearch-snapshots.tar.gz  색인 ${docs}건 (스냅샷 ${SNAPSHOT_NAME}, 생성 ${snap_elapsed}초)
                                파일 ${snap_files}개 / ${snap_bytes} bytes (압축 전)
   lexai.db                     사용자 ${users} · 메시지 ${msgs}
-  checksums.sha256             위 두 파일의 SHA-256
+  source-commit.txt            패키지를 만든 시점의 저장소 커밋 (전체 해시)
+  checksums.sha256             위 세 파일의 SHA-256
 
 정합성 확인
   전송 직후   sha256sum -c checksums.sha256
@@ -202,7 +226,16 @@ LexAI 이관 패키지
   임베딩 모델   AI 서버가 기동 시 자동으로 받습니다
   .env          비밀값이라 제외. 대상 환경에서 직접 작성하세요
 
-대상 환경에서
+저장소째 옮기는 이관 (Beetle 데이터 마이그레이션 등)
+  옮길 것  ~/legal-rag-chatbot  (.env 포함)  +  이 패키지 디렉터리
+  제외     ai/.venv  frontend/node_modules  backend_spring/target
+           (대상에서 install.sh 가 다시 만듭니다 — 경로·파이썬 버전에 묶여 있습니다)
+  실행     NO_UPDATE=1 SNAPSHOT_URI=<옮겨온 패키지 경로> \\
+             bash ~/legal-rag-chatbot/deploy/native/bootstrap.sh
+           NO_UPDATE=1 이면 GitHub 에서 갱신하지 않고, 체크섬과 소스 커밋이
+           이 패키지와 하나라도 다르면 멈춥니다.
+
+대상 환경에서 (저장소를 새로 받는 경우)
   1) git clone <repo> && cd legal-rag-chatbot
   2) cp .env.example .env  후 시크릿 작성 (OPENSEARCH_PASSWORD, JWT_SECRET)
   3) bash deploy/native/install.sh

@@ -24,9 +24,18 @@
 #   SNAPSHOT_URI   이관 패키지 위치       s3://… 또는 https://…
 #   SKIP_DRIVER=1  드라이버 설치 건너뛰기 (GPU 이미지를 쓰는 경우)
 #   NO_START=1     준비만 하고 기동은 안 함
+#   NO_UPDATE=1    이관 모드 — 옮겨온 저장소를 GitHub 에서 갱신하지 않음
+#                  (저장소가 없으면 clone 하지 않고 멈춥니다)
+#                  SNAPSHOT_URI 필수, 체크섬·소스 커밋이 패키지와 다르면 멈춤
 #
 # 예)
 #   curl -fsSL <raw url> | BRANCH=feat/sqlite SNAPSHOT_URI=s3://버킷/lexai bash
+#
+#   # 저장소째 옮긴 경우 (Beetle 데이터 마이그레이션 등)
+#   # ★ curl 로 받지 말고 옮겨온 스크립트를 실행하세요. 받은 스크립트는
+#   #   브랜치 최신본이라 옮겨온 소스와 버전이 다를 수 있습니다.
+#   NO_UPDATE=1 SNAPSHOT_URI=$HOME/lexai-backup/<시각> \
+#     bash ~/legal-rag-chatbot/deploy/native/bootstrap.sh
 # ===========================================================
 
 set -euo pipefail
@@ -100,6 +109,7 @@ BRANCH="${BRANCH:-feat/sqlite}"
 
 RESUME=0
 NO_START="${NO_START:-0}"
+NO_UPDATE="${NO_UPDATE:-0}"
 for arg in "${@:-}"; do
     case "$arg" in
         --resume)   RESUME=1 ;;
@@ -158,6 +168,9 @@ if [ "$(id -u)" -eq 0 ] && [ "${LEXAI_REEXEC:-0}" != "1" ]; then
     # 재실행할 스크립트가 디스크에 있어야 합니다. curl | bash 로 들어온 경우
     # 파일 경로가 없으므로 먼저 저장소를 받습니다.
     if [ ! -d "$_repo/.git" ]; then
+        [ "$NO_UPDATE" = "1" ] && die "NO_UPDATE=1 인데 옮겨온 저장소가 없습니다: $_repo
+  이관 모드는 새로 clone 하지 않습니다(브랜치 최신본이 깔리면 원본과 버전이 달라집니다).
+  저장소 디렉터리를 먼저 옮기거나, REPO_DIR 로 위치를 지정하세요."
         sudo -u "$_user" -H git clone --quiet --branch "$BRANCH" "$REPO_URL" "$_repo"
         ok "clone (${_user}): $_repo"
     fi
@@ -171,6 +184,7 @@ if [ "$(id -u)" -eq 0 ] && [ "${LEXAI_REEXEC:-0}" != "1" ]; then
         REPO_URL="$REPO_URL" BRANCH="$BRANCH" REPO_DIR="$_repo" \
         SNAPSHOT_URI="${SNAPSHOT_URI:-}" SKIP_DRIVER="${SKIP_DRIVER:-0}" \
         ALLOW_EMPTY_INDEX="${ALLOW_EMPTY_INDEX:-0}" \
+        NO_UPDATE="$NO_UPDATE" \
         bash "$_repo/deploy/native/bootstrap.sh" "${_args[@]:-}"
 fi
 
@@ -209,7 +223,20 @@ ok "git $(git --version | cut -d' ' -f3)"
 # git 저장소가 아닌 디렉터리는 타임스탬프를 붙여 비켜둡니다.
 # -----------------------------------------------------------
 log "2. 저장소"
-if [ -d "$REPO_DIR/.git" ]; then
+# -----------------------------------------------------------
+# NO_UPDATE=1 (이관 모드)
+#
+# 저장소를 통째로 옮겨온 경우 여기서 fetch · merge 를 하면 옮겨온 소스가
+# 브랜치 최신본으로 바뀌어, 원본에 배포돼 있던 버전과 달라집니다.
+# 이관 모드에서는 저장소를 건드리지 않고, 5절에서 패키지의 소스 커밋과
+# 대조합니다.
+# -----------------------------------------------------------
+if [ "$NO_UPDATE" = "1" ]; then
+    [ -d "$REPO_DIR/.git" ] || die "NO_UPDATE=1 인데 옮겨온 저장소가 없습니다: $REPO_DIR
+  이관 모드는 새로 clone 하지 않습니다(브랜치 최신본이 깔리면 원본과 버전이 달라집니다).
+  저장소 디렉터리를 먼저 옮기거나, REPO_DIR 로 위치를 지정하세요."
+    ok "NO_UPDATE=1 — 갱신하지 않음: $(git -C "$REPO_DIR" rev-parse --short HEAD) ($(git -C "$REPO_DIR" branch --show-current 2>/dev/null || echo '-'))"
+elif [ -d "$REPO_DIR/.git" ]; then
     git -C "$REPO_DIR" fetch --quiet origin "$BRANCH"
     git -C "$REPO_DIR" checkout --quiet "$BRANCH"
     git -C "$REPO_DIR" merge --ff-only --quiet "origin/$BRANCH" || warn "로컬 커밋이 있어 갱신을 건너뜁니다"
@@ -340,6 +367,8 @@ Environment=NO_START=$NO_START
 # ★ 재부팅 뒤에는 환경이 새로 시작됩니다. curl | bash 앞에 붙인 변수는
 #   여기 적어두지 않으면 사라지고, restore.sh 가 스냅샷이 없다며 죽습니다.
 Environment=ALLOW_EMPTY_INDEX=${ALLOW_EMPTY_INDEX:-0}
+# ★ 이 값이 빠지면 재부팅 뒤 2절이 옮겨온 소스를 브랜치 최신본으로 갱신합니다.
+Environment=NO_UPDATE=$NO_UPDATE
 ExecStart=$NATIVE_DIR/bootstrap.sh --resume
 
 [Install]
@@ -371,7 +400,15 @@ fi
 # (색인 없이 기동하면 서비스는 정상으로 보이는데 답변만 근거가 없습니다).
 # -----------------------------------------------------------
 log "5. 이관 패키지"
+# NO_UPDATE=1 (이관 모드) 에서는 검증을 하나도 건너뛰지 않습니다.
+#   - checksums.sha256 · lexai.db · source-commit.txt 가 전부 있어야 하고
+#   - 세 파일의 체크섬이 모두 맞아야 하며
+#   - 패키지의 소스 커밋이 옮겨온 저장소의 HEAD 와 같아야 합니다.
+# 하나라도 어긋나면 "데이터는 보존됐다"는 결론을 낼 수 없으므로 멈춥니다.
+STRICT="$NO_UPDATE"
+
 if [ -z "${SNAPSHOT_URI:-}" ]; then
+    [ "$STRICT" = "1" ] && die "NO_UPDATE=1 (이관 모드) 에는 SNAPSHOT_URI 가 필요합니다 — backup.sh 패키지 경로를 지정하세요"
     ok "SNAPSHOT_URI 미지정 — 건너뜀"
 else
     mkdir -p "$SNAPSHOT_DIR" "$DATA_DIR"
@@ -401,20 +438,63 @@ else
         esac
     }
 
+    # check_sum <파일명> — checksums.sha256 의 해당 줄로 $tmp/<파일명> 을 검사
+    check_sum() {
+        ( cd "$tmp" && grep -E "[[:space:]]\*?(\./)?$(printf '%s' "$1" | sed 's/\./\\./g')\$" checksums.sha256 | sha256sum -c --quiet ) >/dev/null 2>&1
+    }
+    has_sum() {
+        [ -f "$tmp/checksums.sha256" ] \
+            && grep -qE "[[:space:]]\*?(\./)?$(printf '%s' "$1" | sed 's/\./\\./g')\$" "$tmp/checksums.sha256"
+    }
+
     log "   내려받는 중: $SNAPSHOT_URI"
+
+    # 체크섬 파일을 먼저 받습니다. 이관 모드에서는 없으면 바로 멈춥니다 —
+    # 수 GB 아카이브를 다 옮긴 뒤에 알게 되면 그 시간이 통째로 날아갑니다.
+    if ! fetch "${SNAPSHOT_URI%/}/checksums.sha256" "$tmp/checksums.sha256" 2>/dev/null; then
+        rm -f "$tmp/checksums.sha256"
+        [ "$STRICT" = "1" ] && die "checksums.sha256 이 없습니다 — 이관 모드에서는 무결성 검증 없이 진행하지 않습니다"
+        warn "checksums.sha256 이 없어 체크섬 확인을 건너뜁니다"
+    fi
+
+    # 이관 모드: 소스 커밋을 가장 먼저 대조합니다(가장 싸고, 틀리면 나머지가 무의미).
+    if [ "$STRICT" = "1" ]; then
+        fetch "${SNAPSHOT_URI%/}/source-commit.txt" "$tmp/source-commit.txt" 2>/dev/null \
+            || die "source-commit.txt 가 없습니다 — 소스 커밋을 기록하는 backup.sh 로 패키지를 다시 만드세요"
+        has_sum source-commit.txt || die "checksums.sha256 에 source-commit.txt 항목이 없습니다"
+        check_sum source-commit.txt || die "source-commit.txt 체크섬 불일치 — 전송이 온전하지 않습니다"
+
+        want="$(tr -d '[:space:]' < "$tmp/source-commit.txt")"
+        have="$(git -C "$REPO_DIR" rev-parse HEAD)"
+        if [ "$want" != "$have" ]; then
+            die "소스 커밋 불일치 — 원본과 다른 버전의 소스입니다
+  패키지(원본) : $want
+  옮겨온 소스  : $have
+  원본에서 패키지를 만든 뒤 저장소가 바뀌었거나, 다른 시점의 저장소를 옮겼습니다."
+        fi
+        ok "소스 커밋 일치 (${have:0:7})"
+
+        # 커밋은 같아도 커밋되지 않은 수정은 해시에 드러나지 않습니다.
+        dirty="$(git -C "$REPO_DIR" -c core.fileMode=false status --porcelain --untracked-files=no 2>/dev/null || true)"
+        if [ -n "$dirty" ]; then
+            warn "옮겨온 저장소에 커밋되지 않은 수정이 있습니다 (원본에 있던 수정이면 정상):"
+            printf '%s\n' "$dirty" | sed 's/^/    /' >&2
+        fi
+    fi
+
     fetch "${SNAPSHOT_URI%/}/opensearch-snapshots.tar.gz" "$tmp/opensearch-snapshots.tar.gz"
 
-    # 전송 손상을 압축 풀기 전에 잡습니다. 체크섬 파일이 없으면 건너뛰되,
-    # 있는데 안 맞으면 여기서 멈춥니다 — 깨진 아카이브를 풀어봐야
-    # 뒤에서 더 알기 어려운 형태로 실패할 뿐입니다.
-    if fetch "${SNAPSHOT_URI%/}/checksums.sha256" "$tmp/checksums.sha256" 2>/dev/null; then
-        if ( cd "$tmp" && grep "opensearch-snapshots.tar.gz" checksums.sha256 | sha256sum -c --quiet ); then
+    # 전송 손상을 압축 풀기 전에 잡습니다. 있는데 안 맞으면 여기서 멈춥니다 —
+    # 깨진 아카이브를 풀어봐야 뒤에서 더 알기 어려운 형태로 실패할 뿐입니다.
+    if [ -f "$tmp/checksums.sha256" ]; then
+        if has_sum opensearch-snapshots.tar.gz; then
+            check_sum opensearch-snapshots.tar.gz \
+                || die "아카이브 체크섬 불일치 — 전송이 온전하지 않습니다"
             ok "아카이브 체크섬 확인"
         else
-            die "아카이브 체크섬 불일치 — 전송이 온전하지 않습니다"
+            [ "$STRICT" = "1" ] && die "checksums.sha256 에 opensearch-snapshots.tar.gz 항목이 없습니다"
+            warn "checksums.sha256 에 아카이브 항목이 없어 확인을 건너뜁니다"
         fi
-    else
-        warn "checksums.sha256 이 없어 아카이브 체크섬 확인을 건너뜁니다"
     fi
 
     # -xf 는 압축 형식을 자동 판별합니다 (gzip / 무압축 둘 다 처리).
@@ -426,16 +506,18 @@ else
         #   검사하고 있었습니다. 같은 망 안에서 복사할 때는 드러나지 않지만,
         #   오브젝트 스토리지나 HTTP 로 받으면 잘린 DB 가 그대로 들어가고
         #   SQLite 는 한참 뒤에 알아보기 어려운 형태로 실패합니다.
-        if [ -f "$tmp/checksums.sha256" ] && grep -qE '[[:space:]]lexai\.db$' "$tmp/checksums.sha256"; then
-            if ( cd "$tmp" && grep -E '[[:space:]]lexai\.db$' checksums.sha256 | sha256sum -c --quiet ); then
-                ok "DB 체크섬 확인"
-            else
-                die "DB 체크섬 불일치 — 전송이 온전하지 않습니다"
-            fi
+        if has_sum lexai.db; then
+            check_sum lexai.db || die "DB 체크섬 불일치 — 전송이 온전하지 않습니다"
+            ok "DB 체크섬 확인"
+        elif [ "$STRICT" = "1" ]; then
+            die "checksums.sha256 에 lexai.db 항목이 없습니다"
         fi
         cp "$tmp/lexai.db" "$DATA_DIR/lexai.db"
         ok "DB 배치 ($(du -h "$DATA_DIR/lexai.db" | cut -f1))"
     else
+        # 이관 모드에서 DB 없이 시작하면 사용자·대화 기록이 사라진 채로
+        # 정상 기동한 것처럼 보입니다. 데이터 보존 검증이 거짓 PASS 가 됩니다.
+        [ "$STRICT" = "1" ] && die "lexai.db 가 없습니다 — 이관 모드에서는 빈 DB 로 시작하지 않습니다"
         warn "DB 파일이 없어 건너뜁니다 — 빈 DB 로 시작합니다"
     fi
     rm -rf "$tmp"
