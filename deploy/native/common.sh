@@ -237,6 +237,111 @@ verify_manifest() {
     return 1
 }
 
+# -----------------------------------------------------------
+# 스키마 버전 (SQLite PRAGMA user_version)
+#
+# ★ schema.sqlite.sql 은 CREATE ... IF NOT EXISTS 만 씁니다. 테이블이 이미
+#   있으면 아무것도 바꾸지 않으므로, 컬럼을 추가한 새 코드로 옛 DB 를
+#   이관하면 코드는 새 컬럼을 찾는데 DB 에는 없어 그제서야 오류가 납니다.
+#   그래서 스키마 변경은 deploy/migrations/NNNN_설명.sql 로만 하고,
+#   적용한 번호를 DB 자체(user_version)에 기록합니다. 규칙은 그 폴더의 README.
+#
+#   v0 = schema.sqlite.sql (기준선, 고치지 않음)
+# -----------------------------------------------------------
+SCHEMA_MIGRATIONS_DIR="${SCHEMA_MIGRATIONS_DIR:-$REPO_DIR/deploy/migrations}"
+
+# 번호 순서로 마이그레이션 파일을 나열합니다. 번호가 겹치면 멈춥니다.
+schema_migration_files() {
+    local f b n prev=0
+    for f in "$SCHEMA_MIGRATIONS_DIR"/[0-9][0-9][0-9][0-9]_*.sql; do
+        [ -e "$f" ] || continue
+        b="$(basename "$f")"; n=$((10#${b%%_*}))
+        [ "$n" -gt "$prev" ] || die "마이그레이션 번호가 겹치거나 0 입니다: $b"
+        prev="$n"
+        printf '%s\n' "$f"
+    done
+}
+
+schema_latest_version() {
+    local last
+    last="$(schema_migration_files | tail -1)"
+    if [ -z "$last" ]; then echo 0; else last="$(basename "$last")"; echo $((10#${last%%_*})); fi
+}
+
+# apply_schema_migrations <DB 경로> — 아직 적용하지 않은 번호만 순서대로 적용합니다.
+# 파일마다 한 트랜잭션이라, 실패하면 그 파일의 변경과 버전 기록이 함께 취소됩니다.
+apply_schema_migrations() {
+    local db="$1" cur latest f b n files
+    cur="$(sqlite3 "$db" "PRAGMA user_version;")"
+    files="$(schema_migration_files)"
+    latest="$(schema_latest_version)"
+
+    if [ "$cur" -gt "$latest" ]; then
+        die "DB 스키마가 코드보다 새 버전입니다 (DB v${cur} / 코드 v${latest})
+  더 새 코드에서 만든 DB 를 옛 코드로 옮긴 경우입니다. 같은 커밋의 코드로 이관하세요."
+    fi
+
+    for f in $files; do
+        b="$(basename "$f")"; n=$((10#${b%%_*}))
+        [ "$n" -le "$cur" ] && continue
+        { printf 'BEGIN;\n'; cat "$f"; printf '\nPRAGMA user_version = %d;\nCOMMIT;\n' "$n"; } \
+            | sqlite3 -bail "$db" >/dev/null \
+            || die "스키마 마이그레이션 실패: $b — DB 는 v${cur} 그대로입니다"
+        ok "마이그레이션 적용: $b (v${n})"
+        cur="$n"
+    done
+    ok "스키마 버전 v${cur} (코드 최신 v${latest})"
+}
+
+# -----------------------------------------------------------
+# 데이터 지문 (이관 전후 데이터 보존 확인)
+#
+# 테이블마다 "행 수 + 내용 해시" 를 남깁니다. 원본에서 패키지를 만들 때
+# 한 번(backup.sh), 대상에서 복원 직후 · 서비스 기동 전에 한 번(check-data.sh)
+# 계산해 비교합니다.
+#
+# ★ 기동 전에 비교하는 이유: 배포 마지막의 verify.sh 가 verify 계정을
+#   가입시키고 채팅을 보내 DB 에 행을 더합니다. 그 뒤에 세면 원본과
+#   항상 달라 보입니다.
+# ★ 컬럼 목록을 같이 기록하고 대상에서도 그 컬럼만 해시합니다. 대상에서
+#   마이그레이션이 컬럼을 더해도 원본 데이터 비교는 그대로 유효합니다.
+#
+# 형식(TSV): 테이블 <TAB> 행수 <TAB> 컬럼,목록 <TAB> sha256
+# -----------------------------------------------------------
+_table_hash() {  # _table_hash <db> <테이블> <컬럼,목록>
+    sqlite3 -readonly "$1" ".mode quote" "SELECT $3 FROM \"$2\" ORDER BY rowid;" | sha256sum | cut -d' ' -f1
+}
+
+# write_data_fingerprint <db> <출력 파일>
+write_data_fingerprint() {
+    local db="$1" out="$2" t cols n
+    : > "$out"
+    for t in $(sqlite3 -readonly "$db" "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;"); do
+        cols="$(sqlite3 -readonly "$db" "SELECT group_concat('\"'||name||'\"', ',') FROM (SELECT name FROM pragma_table_info('$t') ORDER BY cid);")"
+        n="$(sqlite3 -readonly "$db" "SELECT COUNT(*) FROM \"$t\";")"
+        printf '%s\t%s\t%s\t%s\n' "$t" "$n" "$cols" "$(_table_hash "$db" "$t" "$cols")" >> "$out"
+    done
+}
+
+# check_data_fingerprint <db> <기대 지문 파일> — 표로 출력하고, 하나라도 다르면 1
+check_data_fingerprint() {
+    local db="$1" want="$2" t n cols h have_n have_h bad=0 status
+    printf '    %-22s %10s %10s  %s\n' "테이블" "원본" "대상" "내용"
+    while IFS=$'\t' read -r t n cols h; do
+        [ -n "$t" ] || continue
+        if [ "$(sqlite3 -readonly "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='$t';")" != "1" ]; then
+            printf '    %-22s %10s %10s  %s\n' "$t" "$n" "-" "테이블 없음"; bad=1; continue
+        fi
+        have_n="$(sqlite3 -readonly "$db" "SELECT COUNT(*) FROM \"$t\";")"
+        if ! have_h="$(_table_hash "$db" "$t" "$cols" 2>/dev/null)" || [ -z "$have_h" ]; then
+            printf '    %-22s %10s %10s  %s\n' "$t" "$n" "$have_n" "컬럼 누락"; bad=1; continue
+        fi
+        if [ "$have_n" = "$n" ] && [ "$have_h" = "$h" ]; then status="일치"; else status="불일치"; bad=1; fi
+        printf '    %-22s %10s %10s  %s\n' "$t" "$n" "$have_n" "$status"
+    done < "$want"
+    [ "$bad" = "0" ]
+}
+
 # 조건이 참이 될 때까지 대기. wait_for <설명> <최대초> <명령...>
 wait_for() {
     local label="$1" timeout="$2"; shift 2

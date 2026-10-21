@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# ===========================================================
+# 데이터 보존 확인 — 이관해 온 DB 가 원본과 같은지
+#
+#   bash deploy/native/check-data.sh
+#
+# up.sh 가 "데이터 준비" 직후 · "기동" 전에 자동으로 부릅니다.
+# bootstrap.sh 가 이관 패키지의 지문(data-fingerprint.tsv)을
+# ~/lexai-data/source-fingerprint.tsv 로 놓아 둔 경우에만 동작합니다.
+#
+# 서비스 기동 전에 재는 이유: verify.sh 가 verify 계정과 채팅을 DB 에
+# 더하므로, 그 뒤에 세면 원본과 항상 달라 보입니다.
+#
+# 통과하면 지문 파일을 source-fingerprint.checked-<시각>.tsv 로 바꿔 둡니다.
+# 같은 VM 에서 up.sh 를 다시 돌릴 때(이미 verify 데이터가 더해진 뒤)
+# 같은 비교를 반복해 거짓 FAIL 이 나지 않게 하기 위해서입니다.
+# ===========================================================
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+
+WANT="$DATA_DIR/source-fingerprint.tsv"
+REPORT="$RUN_DIR/data-check.txt"
+
+if [ ! -f "$WANT" ]; then
+    ok "비교할 원본 지문이 없습니다 — 건너뜀 (이관이 아닌 배포)"
+    exit 0
+fi
+[ -f "$DB_PATH" ] || die "DB 파일이 없습니다: $DB_PATH"
+
+log "데이터 보존 확인 (원본 패키지 ↔ 이 VM)"
+if check_data_fingerprint "$DB_PATH" "$WANT" | tee "$REPORT.tmp"; then
+    result=PASS
+else
+    result=FAIL
+fi
+{ echo "데이터 보존 확인 : $result"; echo "시각 : $(date '+%Y-%m-%d %H:%M:%S %Z')"; echo "DB   : $DB_PATH"; echo; cat "$REPORT.tmp"; } > "$REPORT"
+rm -f "$REPORT.tmp"
+
+if [ "$result" = "PASS" ]; then
+    mv "$WANT" "$DATA_DIR/source-fingerprint.checked-$(date +%Y%m%d-%H%M%S).tsv"
+    ok "데이터 보존 PASS — 모든 테이블의 행 수와 내용이 원본과 같습니다 (기록: $REPORT)"
+else
+    die "데이터 보존 FAIL — 원본과 다른 테이블이 있습니다 (기록: $REPORT)"
+fi

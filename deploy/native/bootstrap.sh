@@ -27,6 +27,12 @@
 #   NO_UPDATE=1    이관 모드 — 옮겨온 저장소를 GitHub 에서 갱신하지 않음
 #                  (저장소가 없으면 clone 하지 않고 멈춥니다)
 #                  SNAPSHOT_URI 필수, 체크섬·소스 커밋이 패키지와 다르면 멈춤
+#                  대상에 기존 설치(DB·스냅샷·유닛)가 있으면 멈춤
+#                  verify.sh(응답 검증)는 기본으로 건너뜁니다 — 아래 RUN_VERIFY
+#   RUN_VERIFY=1   이관 모드에서도 verify.sh 를 실행 (verify 계정 · 채팅이 DB 에 남음)
+#   FORCE_CLEAN=1  기존 설치가 있어도 진행 — 서비스 중지 → 색인 삭제 →
+#                  기존 DB 는 ~/lexai-replaced/<시각> 으로 옮김 → 스냅샷 폴더 비움
+#                  (패키지 검증이 모두 끝난 뒤에만 비웁니다)
 #
 # 예)
 #   curl -fsSL <raw url> | BRANCH=feat/sqlite SNAPSHOT_URI=s3://버킷/lexai bash
@@ -34,7 +40,7 @@
 #   # 저장소째 옮긴 경우 (Beetle 데이터 마이그레이션 등)
 #   # ★ curl 로 받지 말고 옮겨온 스크립트를 실행하세요. 받은 스크립트는
 #   #   브랜치 최신본이라 옮겨온 소스와 버전이 다를 수 있습니다.
-#   NO_UPDATE=1 SNAPSHOT_URI=$HOME/lexai-backup/<시각> \
+#   NO_UPDATE=1 SNAPSHOT_URI=$HOME/lexai-backup/latest \
 #     bash ~/legal-rag-chatbot/deploy/native/bootstrap.sh
 # ===========================================================
 
@@ -110,6 +116,8 @@ BRANCH="${BRANCH:-feat/sqlite}"
 RESUME=0
 NO_START="${NO_START:-0}"
 NO_UPDATE="${NO_UPDATE:-0}"
+FORCE_CLEAN="${FORCE_CLEAN:-0}"
+RUN_VERIFY="${RUN_VERIFY:-0}"
 for arg in "${@:-}"; do
     case "$arg" in
         --resume)   RESUME=1 ;;
@@ -184,7 +192,7 @@ if [ "$(id -u)" -eq 0 ] && [ "${LEXAI_REEXEC:-0}" != "1" ]; then
         REPO_URL="$REPO_URL" BRANCH="$BRANCH" REPO_DIR="$_repo" \
         SNAPSHOT_URI="${SNAPSHOT_URI:-}" SKIP_DRIVER="${SKIP_DRIVER:-0}" \
         ALLOW_EMPTY_INDEX="${ALLOW_EMPTY_INDEX:-0}" \
-        NO_UPDATE="$NO_UPDATE" \
+        NO_UPDATE="$NO_UPDATE" FORCE_CLEAN="$FORCE_CLEAN" RUN_VERIFY="$RUN_VERIFY" \
         bash "$_repo/deploy/native/bootstrap.sh" "${_args[@]:-}"
 fi
 
@@ -369,6 +377,8 @@ Environment=NO_START=$NO_START
 Environment=ALLOW_EMPTY_INDEX=${ALLOW_EMPTY_INDEX:-0}
 # ★ 이 값이 빠지면 재부팅 뒤 2절이 옮겨온 소스를 브랜치 최신본으로 갱신합니다.
 Environment=NO_UPDATE=$NO_UPDATE
+Environment=FORCE_CLEAN=$FORCE_CLEAN
+Environment=RUN_VERIFY=$RUN_VERIFY
 ExecStart=$NATIVE_DIR/bootstrap.sh --resume
 
 [Install]
@@ -434,7 +444,12 @@ else
             gs://*)   ensure_cli gsutil google-cloud-cli "https://cloud.google.com/sdk/docs/install 참고 (apt 저장소 등록 필요)"
                       gsutil -q cp "$1" "$2" ;;
             http*)    curl -fsSL "$1" -o "$2" ;;
-            *)        cp "$1" "$2" ;;
+            # ★ 로컬 경로(Beetle 로 옮겨 온 패키지)는 복사하지 않고 링크합니다.
+            #   5GB 아카이브를 임시 폴더로 한 번 더 복사하면 대상 디스크를
+            #   두 배로 쓰고 시간도 그만큼 듭니다. 체크섬 · 압축 해제 · DB 복사는
+            #   링크를 따라가므로 그대로 동작합니다.
+            *)        [ -f "$1" ] || return 1
+                      ln -s "$(readlink -f "$1")" "$2" ;;
         esac
     }
 
@@ -497,10 +512,7 @@ else
         fi
     fi
 
-    # -xf 는 압축 형식을 자동 판별합니다 (gzip / 무압축 둘 다 처리).
-    tar -xf "$tmp/opensearch-snapshots.tar.gz" -C "$SNAPSHOT_DIR"
-    ok "색인 스냅샷 배치 ($(du -sh "$SNAPSHOT_DIR" | cut -f1))"
-
+    HAVE_DB=0
     if fetch "${SNAPSHOT_URI%/}/lexai.db" "$tmp/lexai.db" 2>/dev/null; then
         # ★ 체크섬 파일에는 DB 해시도 들어 있는데 위에서 아카이브 줄만 골라
         #   검사하고 있었습니다. 같은 망 안에서 복사할 때는 드러나지 않지만,
@@ -512,13 +524,120 @@ else
         elif [ "$STRICT" = "1" ]; then
             die "checksums.sha256 에 lexai.db 항목이 없습니다"
         fi
-        cp "$tmp/lexai.db" "$DATA_DIR/lexai.db"
-        ok "DB 배치 ($(du -h "$DATA_DIR/lexai.db" | cut -f1))"
+        HAVE_DB=1
     else
         # 이관 모드에서 DB 없이 시작하면 사용자·대화 기록이 사라진 채로
         # 정상 기동한 것처럼 보입니다. 데이터 보존 검증이 거짓 PASS 가 됩니다.
         [ "$STRICT" = "1" ] && die "lexai.db 가 없습니다 — 이관 모드에서는 빈 DB 로 시작하지 않습니다"
         warn "DB 파일이 없어 건너뜁니다 — 빈 DB 로 시작합니다"
+    fi
+
+    # 데이터 지문 — 대상에서 복원 직후 원본과 자동 비교합니다(check-data.sh).
+    HAVE_FP=0
+    if fetch "${SNAPSHOT_URI%/}/data-fingerprint.tsv" "$tmp/data-fingerprint.tsv" 2>/dev/null; then
+        if has_sum data-fingerprint.tsv; then
+            check_sum data-fingerprint.tsv || die "data-fingerprint.tsv 체크섬 불일치 — 전송이 온전하지 않습니다"
+        elif [ "$STRICT" = "1" ]; then
+            die "checksums.sha256 에 data-fingerprint.tsv 항목이 없습니다"
+        fi
+        HAVE_FP=1
+        ok "데이터 지문 확인"
+    elif [ "$STRICT" = "1" ]; then
+        die "data-fingerprint.tsv 가 없습니다 — 데이터 보존을 판정할 수 없습니다. 지금 버전의 backup.sh 로 패키지를 다시 만드세요"
+    fi
+
+    # 압축 해제 전에 공간을 봅니다. 풀다가 No space left 로 죽으면 반쯤 풀린
+    # 스냅샷이 남아 다음 시도의 정합성 대조까지 막습니다.
+    # (풀린 크기는 아카이브의 약 1.15배 — 1차 실행 5.27GB → 6.0GB)
+    need_kb=$(( $(stat -L -c %s "$tmp/opensearch-snapshots.tar.gz") / 1024 * 12 / 10 ))
+    free_kb=$(df -Pk "$SNAPSHOT_DIR" | awk 'NR==2 {print $4}')
+    if [ "$free_kb" -lt "$need_kb" ]; then
+        die "스냅샷을 풀 공간이 부족합니다 — 필요 약 $((need_kb/1024/1024))GB / 여유 $((free_kb/1024/1024))GB (df -h 확인)"
+    fi
+
+    # -----------------------------------------------------------
+    # 기존 설치 확인 (패키지 검증이 모두 끝난 뒤, 무엇이든 덮어쓰기 전)
+    #
+    # ★ 이미 LexAI 가 깔린 VM 에 다시 이관하면(A→B→A) 세 가지가 조용히 꼬입니다.
+    #   - restore.sh 는 색인에 문서가 있으면 복원을 건너뛰어 옛 색인이 남습니다.
+    #   - 옛 스냅샷 파일이 남아 새 패키지와 섞이고, 정합성 대조가 어긋납니다.
+    #   - DB 파일만 바뀌고 옛 -wal/-shm 이 남으면, 다음 열 때 옛 WAL 이 새 DB 에
+    #     덧씌워져 손상되거나 내용이 섞일 수 있습니다.
+    #   이관 모드에서는 기존 설치를 찾으면 멈추고, FORCE_CLEAN=1 일 때만 비웁니다.
+    #   (이관 모드가 아니면 예전처럼 재실행을 허용합니다 — 같은 VM 재시도용)
+    # -----------------------------------------------------------
+    found=()
+    for f in lexai.db lexai.db-wal lexai.db-shm lexai.db-journal; do
+        if [ -e "$DATA_DIR/$f" ]; then found+=("DB 파일   $DATA_DIR/$f"); fi
+    done
+    if [ -n "$(ls -A "$SNAPSHOT_DIR" 2>/dev/null)" ]; then
+        found+=("스냅샷    $SNAPSHOT_DIR ($(du -sh "$SNAPSHOT_DIR" 2>/dev/null | cut -f1))")
+    fi
+    for u in lexai-opensearch lexai-ai lexai-tomcat lexai-frontend; do
+        if [ -f "/etc/systemd/system/$u.service" ]; then found+=("서비스    $u"); fi
+    done
+
+    if [ "${#found[@]}" -gt 0 ] && { [ "$STRICT" = "1" ] || [ "$FORCE_CLEAN" = "1" ]; }; then
+        if [ "$FORCE_CLEAN" != "1" ]; then
+            die "이 VM 에 기존 LexAI 설치가 있습니다 — 그대로 덮으면 옛 색인이 남고 DB 가 손상될 수 있습니다
+$(printf '    %s\n' "${found[@]}")
+  새 VM 으로 이관하거나, 기존 데이터를 비우고 진행하려면 FORCE_CLEAN=1 을 함께 주세요.
+  (이 VM 에서 이전 이관이 중간에 실패해 다시 돌리는 경우도 같습니다)"
+        fi
+
+        log "   FORCE_CLEAN=1 — 기존 설치를 비웁니다"
+        printf '    %s\n' "${found[@]}"
+
+        # 1) 쓰기 중지. DB 에 쓰는 것은 Tomcat 뿐이지만 AI 서버도 색인을 읽으므로 같이 멈춥니다.
+        for t in frontend tomcat ai; do bash "$NATIVE_DIR/stop.sh" "$t" >/dev/null; done
+        ok "frontend · tomcat · ai 정지"
+
+        # 2) 색인과 스냅샷 저장소 등록을 지웁니다. 파일만 지우면 OpenSearch 가
+        #    저장소 세대 정보를 기억하고 있어 새 스냅샷 등록이 어긋날 수 있습니다.
+        if [ -f /etc/systemd/system/lexai-opensearch.service ]; then
+            (
+                source "$NATIVE_DIR/common.sh"
+                load_opensearch_creds
+                sudo systemctl start lexai-opensearch
+                wait_for "OpenSearch" 180 os_ready || die "OpenSearch 가 준비되지 않았습니다 — $LOG_DIR 확인"
+                code=$(os_curl -o /dev/null -w '%{http_code}' -X DELETE "$OS_BASE/${INDEX_NAME:-legal_documents}")
+                case "$code" in
+                    200|404) ok "색인 삭제 (${INDEX_NAME:-legal_documents}, HTTP $code)" ;;
+                    401)     die "OpenSearch 인증 실패 — .env 의 OPENSEARCH_PASSWORD 가 이 VM 에 설치된 값과 다릅니다" ;;
+                    *)       die "색인 삭제 실패 (HTTP $code)" ;;
+                esac
+                os_curl -o /dev/null -X DELETE "$OS_BASE/_snapshot/${SNAPSHOT_REPO:-lexai}" || true
+                ok "스냅샷 저장소 등록 해제"
+            )
+        fi
+
+        # 3) DB 는 지우지 않고 옮겨 둡니다(작아서 공간 부담이 없고, 되돌릴 길을 남깁니다).
+        replaced="$HOME/lexai-replaced/$(date +%Y%m%d-%H%M%S)"
+        for f in lexai.db lexai.db-wal lexai.db-shm lexai.db-journal source-fingerprint.tsv; do
+            if [ -e "$DATA_DIR/$f" ]; then mkdir -p "$replaced"; mv "$DATA_DIR/$f" "$replaced/"; fi
+        done
+        for f in "$DATA_DIR"/source-fingerprint.checked-*.tsv; do
+            if [ -e "$f" ]; then mkdir -p "$replaced"; mv "$f" "$replaced/"; fi
+        done
+        [ -d "$replaced" ] && ok "기존 DB 보관: $replaced"
+
+        # 4) 스냅샷 폴더는 패키지 사본이라 비웁니다(수 GB).
+        find "$SNAPSHOT_DIR" -mindepth 1 -delete 2>/dev/null || sudo find "$SNAPSHOT_DIR" -mindepth 1 -delete
+        ok "스냅샷 폴더 비움"
+    elif [ "${#found[@]}" -gt 0 ]; then
+        warn "기존 설치가 있습니다 — 이관 모드가 아니라 예전처럼 덮어씁니다 (같은 VM 재시도용)"
+    fi
+
+    # -xf 는 압축 형식을 자동 판별합니다 (gzip / 무압축 둘 다 처리).
+    tar -xf "$tmp/opensearch-snapshots.tar.gz" -C "$SNAPSHOT_DIR"
+    ok "색인 스냅샷 배치 ($(du -sh "$SNAPSHOT_DIR" | cut -f1))"
+
+    if [ "$HAVE_DB" = "1" ]; then
+        cp "$tmp/lexai.db" "$DATA_DIR/lexai.db"
+        ok "DB 배치 ($(du -h "$DATA_DIR/lexai.db" | cut -f1))"
+    fi
+    if [ "$HAVE_FP" = "1" ]; then
+        cp "$tmp/data-fingerprint.tsv" "$DATA_DIR/source-fingerprint.tsv"
     fi
     rm -rf "$tmp"
 fi
@@ -537,4 +656,17 @@ if [ "$NO_START" = "1" ]; then
 fi
 
 log "6. up.sh 실행"
+# 이관 모드
+# ★ verify.sh 는 verify 계정을 가입시키고 실제로 채팅을 보내 DB 에 기록을
+#   남깁니다. 이관을 반복할 때마다 그 기록이 쌓여 리뷰어가 보는 데이터에
+#   섞이므로, 응답 검증은 첫 배포(이관 모드가 아닌 실행)에서만 돌립니다.
+#   이관에서는 대신 아래가 자동으로 확인됩니다(읽기만 함):
+#     - check-data.sh  테이블별 행 수 · 내용이 원본과 같은지
+#     - start.sh       서비스마다 헬스체크 통과 + 모델 GPU 적재
+#   필요하면 RUN_VERIFY=1 로 켭니다. 그때도 응답 속도 FAIL 은 이관 실패로
+#   보고하지 않습니다(VERIFY_GATE=0, up.sh 참고).
+if [ "$NO_UPDATE" = "1" ]; then
+    export VERIFY_GATE="${VERIFY_GATE:-0}"
+    if [ "$RUN_VERIFY" != "1" ]; then export SKIP_VERIFY=1; fi
+fi
 exec bash "$NATIVE_DIR/up.sh"

@@ -165,6 +165,39 @@ if want frontend; then
 fi
 
 
+# -----------------------------------------------------------
+# 모델 예열
+#
+# ★ 첫 질문 때 Ollama 가 모델(약 4.5GB)을 디스크에서 GPU 로 처음 올립니다.
+#   디스크가 느리면(gp2 · 새 EBS 첫 읽기) 이것만 3~5분 걸려 백엔드 타임아웃
+#   (180초)을 넘깁니다. 1차 실행의 검증 FAIL 원인이 정확히 이것이었습니다.
+#   기동 직후 여기서 미리 올려 둡니다.
+# ★ 옵션을 실제 호출(ai/core/model.py)과 같게 num_ctx 4096 으로 맞춥니다.
+#   다르면 Ollama 가 첫 실제 질문에서 모델을 다시 올립니다.
+# KEEP_ALIVE 는 install.sh 가 24h 로 걸어 둡니다.
+# 실패해도 기동은 성공으로 둡니다 — 첫 질문이 느릴 뿐 서비스는 정상입니다.
+# -----------------------------------------------------------
+warm_model() {  # warm_model <모델>
+    local m="$1" t0 code
+    t0=$(date +%s)
+    log "   모델 예열: $m (느린 디스크에서는 수 분)"
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "${WARMUP_TIMEOUT:-900}" \
+        "http://127.0.0.1:${OLLAMA_PORT}/api/generate" \
+        -d "{\"model\":\"$m\",\"prompt\":\"\",\"keep_alive\":\"24h\",\"options\":{\"num_ctx\":4096}}") || true   # 실패 시 curl 이 000 을 찍습니다
+    if [ "$code" = "200" ]; then
+        ok "$m GPU 적재 ($(( $(date +%s) - t0 ))초)"
+    else
+        warn "$m 예열 실패 (HTTP $code) — 첫 질문이 느릴 수 있습니다"
+    fi
+}
+
+if [ "$TARGET" = "all" ] && [ "${SKIP_WARMUP:-0}" != "1" ]; then
+    log "모델 예열"
+    warm_model "${OLLAMA_MODEL:-legal-gemma}"
+    warm_model "${OLLAMA_REWRITE_MODEL:-gemma3:1b}"
+fi
+
+
 echo
 log "기동 완료"
 echo "  Frontend : http://127.0.0.1:${FRONTEND_PORT}"

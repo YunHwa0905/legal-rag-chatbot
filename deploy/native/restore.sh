@@ -28,11 +28,15 @@ log "1. SQLite 스키마"
 mkdir -p "$(dirname "$DB_PATH")"
 # PRAGMA journal_mode 문이 결과값을 출력하므로 조용히 적용합니다.
 sqlite3 "$DB_PATH" < "$REPO_DIR/deploy/schema.sqlite.sql" > /dev/null
+# 기준선(v0) 위에 deploy/migrations 의 변경을 순서대로 올립니다.
+# 이관해 온 DB 는 원본에서 이미 적용한 번호를 기억하고 있어 나머지만 적용됩니다.
+apply_schema_migrations "$DB_PATH"
 
 tables=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
 triggers=$(sqlite3 "$DB_PATH" "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger';")
 mode=$(sqlite3 "$DB_PATH" "PRAGMA journal_mode;")
-[ "$tables" -eq 6 ] || die "테이블이 6개가 아닙니다 (현재 ${tables}개)"
+# 기준선이 6개입니다. 마이그레이션이 테이블을 더할 수 있으므로 "최소 6개" 로 봅니다.
+[ "$tables" -ge 6 ] || die "테이블이 6개보다 적습니다 (현재 ${tables}개)"
 [ "$mode" = "wal" ] || warn "journal_mode 가 wal 이 아닙니다: $mode"
 ok "테이블 ${tables} / 트리거 ${triggers} / journal_mode ${mode}"
 ok "DB: $DB_PATH"
