@@ -175,10 +175,10 @@ done
 # 이관 도구로 실행되면 TTY 가 없고 출력이 로그로 수집됩니다.
 # 색상 제어문자가 섞이면 읽기 어려우니 TTY 일 때만 색을 씁니다.
 if [ -t 1 ]; then
-    C_HEAD=$'\033[1;35m'; C_OK=$'\033[0;32m'
+    C_HEAD=$'\033[1;35m'; C_OK=$'\033[0;32m'; C_INFO=$'\033[0;36m'
     C_WARN=$'\033[0;33m'; C_ERR=$'\033[0;31m'; C_OFF=$'\033[0m'
 else
-    C_HEAD=""; C_OK=""; C_WARN=""; C_ERR=""; C_OFF=""
+    C_HEAD=""; C_OK=""; C_INFO=""; C_WARN=""; C_ERR=""; C_OFF=""
 fi
 
 log()  { printf '%s[compose]%s %s\n' "$C_HEAD" "$C_OFF" "$*"; }
@@ -1091,14 +1091,39 @@ if [ "$NO_START" = "1" ]; then
     exit 0
 fi
 
-log "7. 이미지 받기"
-phase compose:7-pull
+# -----------------------------------------------------------
+# 여기부터는 네이티브 up.sh 와 같은 모양으로 출력합니다.
+#   ━━ 설치 ━━ → ━━ 데이터 준비 ━━ → (━━ 데이터 보존 확인 ━━) → ━━ 기동 ━━ → ━━ 검증 ━━ → ━━ 요약 ━━
+# 줄마다 시각을 붙이고, 마지막 요약에 단계별 소요 시간을 남깁니다. 리뷰어가 두 형태의
+# 로그를 나란히 놓고 같은 단계끼리 비교할 수 있게 하려는 것입니다.
+# 단계 이름은 status.json 의 phase · failed_phase 에도 그대로 들어갑니다(네이티브와 같음).
+# -----------------------------------------------------------
+logt() { printf '%s[%s]%s %s\n' "$C_INFO" "$(date +%H:%M:%S)" "$C_OFF" "$*"; }
+declare -a PHASE_NAMES=()
+declare -a PHASE_SECS=()
+_PH_NAME=""; _PH_START=0
+phase_end() {
+    if [ -n "$_PH_NAME" ]; then
+        PHASE_NAMES+=("$_PH_NAME"); PHASE_SECS+=($(( $(date +%s) - _PH_START )))
+        _PH_NAME=""
+    fi
+}
+phase_begin() {  # phase_begin <단계 이름>
+    phase_end
+    _PH_NAME="$1"; _PH_START=$(date +%s)
+    echo
+    printf '%s━━ %s ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$C_HEAD" "$1" "$C_OFF"
+    phase "$1"
+}
+UP_START=$(date +%s)
+
+phase_begin "설치"
 if [ -f docker-compose.lock.yml ] && grep -q '@sha256:' docker-compose.lock.yml; then
-    log "   원본과 같은 digest 로 받습니다 (docker-compose.lock.yml)"
+    logt "이미지 받기 — 원본과 같은 digest (docker-compose.lock.yml)"
 elif [ -f docker-compose.lock.yml ]; then
-    log "   Ollama 는 원본 버전으로, 나머지는 ${REGISTRY_PREFIX}/lexai-*:${IMAGE_TAG} 로 받습니다"
+    logt "이미지 받기 — Ollama 는 원본 버전, 나머지는 ${REGISTRY_PREFIX}/lexai-*:${IMAGE_TAG}"
 else
-    log "   ${REGISTRY_PREFIX}/lexai-{frontend,tomcat,ai}:${IMAGE_TAG}"
+    logt "이미지 받기 — ${REGISTRY_PREFIX}/lexai-{frontend,tomcat,ai}:${IMAGE_TAG}"
 fi
 # ★ digest 로 고정한 경우에는 이미 있는 이미지를 다시 받지 않습니다(같은 digest 는
 #   같은 내용). Docker Hub 익명 받기 제한(429)에 걸릴 여지도 줄어듭니다.
@@ -1112,7 +1137,7 @@ for try in 1 2 3; do
 done
 [ "$pulled" = "1" ] || die "이미지를 받지 못했습니다 — 레지스트리 접근 · 태그(또는 lock 의 digest)를 확인하세요
   429 Too Many Requests 면 Docker Hub 익명 받기 제한입니다: docker login 후 다시 실행하거나 잠시 뒤 재시도하세요."
-ok "pull 완료"
+ok "이미지 받기 완료"
 
 
 # -----------------------------------------------------------
@@ -1123,8 +1148,8 @@ ok "pull 완료"
 #   덧씌워질 수 있었고, 그 사이 들어온 쓰기가 섞일 수도 있었습니다.
 #   tomcat 이미지로 일회성 컨테이너를 띄워 볼륨에 직접 넣습니다.
 # -----------------------------------------------------------
-log "8. SQLite DB"
-phase compose:8-db
+phase_begin "데이터 준비"
+logt "SQLite DB"
 DB_IN="/var/lib/lexai/lexai.db"
 if [ "$HAVE_DB" = "1" ] && [ "$PKG_SKIP" = "0" ]; then
     compose stop frontend tomcat >/dev/null 2>&1 || true
@@ -1144,27 +1169,6 @@ else
     ok "이관 DB 없음 — 볼륨에 DB 가 없으면 entrypoint 가 빈 스키마로 만듭니다"
 fi
 
-# 데이터 보존 확인 — 기동 전에 잽니다. verify.sh 가 verify 계정과 채팅을
-# 더하므로 그 뒤에 세면 원본과 항상 달라 보입니다.
-if [ "$HAVE_FP" = "1" ] && [ "$PKG_SKIP" = "0" ]; then
-    log "   데이터 보존 확인 (원본 패키지 ↔ 이 VM)"
-    mkdir -p "$RUN_DIR"
-    REPORT="$RUN_DIR/data-check.txt"
-    if trun -v "$RESTORE_DIR:/in:ro" -v "$DEPLOY_DIR/datacheck.sh:/opt/datacheck.sh:ro" \
-            "bash /opt/datacheck.sh check $DB_IN /in/data-fingerprint.tsv" | tee "$REPORT.tmp"; then
-        result=PASS
-    else
-        result=FAIL
-    fi
-    { echo "데이터 보존 확인 : $result"; echo "시각 : $(date '+%Y-%m-%d %H:%M:%S %Z')"; echo "형태 : compose (${PROJECT}_lexai_data:$DB_IN)"; echo; cat "$REPORT.tmp"; } > "$REPORT"
-    rm -f "$REPORT.tmp"
-    status_set data_check="$result" data_check_report="$REPORT"
-    [ "$result" = "PASS" ] || die "데이터 보존 FAIL — 원본과 다른 테이블이 있습니다 (기록: $REPORT)"
-    ok "데이터 보존 PASS — 모든 테이블의 행 수와 내용이 원본과 같습니다 (기록: $REPORT)"
-elif [ "$HAVE_DB" = "1" ] && [ "$PKG_SKIP" = "0" ]; then
-    warn "패키지에 data-fingerprint.tsv 가 없어 데이터 보존을 판정하지 못합니다"
-fi
-
 
 # -----------------------------------------------------------
 # 9. 색인
@@ -1172,8 +1176,7 @@ fi
 # OpenSearch 만 먼저 띄워 복원합니다. ai 까지 같이 띄우면 ai 가 빈 색인을
 # 먼저 만들어 복원이 이름 충돌로 막히는 경쟁이 생깁니다.
 # -----------------------------------------------------------
-log "9. 색인"
-phase compose:9-index
+logt "색인 — OpenSearch 만 먼저 기동"
 compose up -d --no-build opensearch >/dev/null \
     || die "OpenSearch 를 띄우지 못했습니다 — docker compose logs opensearch"
 wait_healthy opensearch 600 || die "OpenSearch 가 10분 안에 준비되지 않았습니다 — docker compose logs opensearch"
@@ -1211,7 +1214,7 @@ if [ "$HAVE_PKG" = "1" ] && [ "$PKG_SKIP" = "0" ]; then
         fi
     fi
 
-    log "   복원 중: $snap (수 분 걸립니다)"
+    logt "색인 복원 중: $snap (수 분 걸립니다)"
     started=$(date +%s)
     resp=$(os -X POST "$OS_BASE/_snapshot/${SNAPSHOT_REPO}/${snap}/_restore?wait_for_completion=true" \
         -H 'Content-Type: application/json' -d "{\"indices\":\"${INDEX_NAME}\"}")
@@ -1230,6 +1233,30 @@ elif [ "$PKG_SKIP" = "1" ]; then
     ok "이미 적용한 패키지 — 색인 $(os_count)건"
 fi
 
+# 데이터 보존 확인 — 기동 전에 잽니다. verify.sh 가 verify 계정과 채팅을
+# 더하므로 그 뒤에 세면 원본과 항상 달라 보입니다.
+DATA_RESULT="해당 없음"
+if [ "$HAVE_FP" = "1" ] && [ "$PKG_SKIP" = "0" ]; then
+    phase_begin "데이터 보존 확인"
+    logt "원본 패키지 ↔ 이 VM"
+    mkdir -p "$RUN_DIR"
+    REPORT="$RUN_DIR/data-check.txt"
+    if trun -v "$RESTORE_DIR:/in:ro" -v "$DEPLOY_DIR/datacheck.sh:/opt/datacheck.sh:ro" \
+            "bash /opt/datacheck.sh check $DB_IN /in/data-fingerprint.tsv" | tee "$REPORT.tmp"; then
+        result=PASS
+    else
+        result=FAIL
+    fi
+    { echo "데이터 보존 확인 : $result"; echo "시각 : $(date '+%Y-%m-%d %H:%M:%S %Z')"; echo "형태 : compose (${PROJECT}_lexai_data:$DB_IN)"; echo; cat "$REPORT.tmp"; } > "$REPORT"
+    rm -f "$REPORT.tmp"
+    status_set data_check="$result" data_check_report="$REPORT"
+    [ "$result" = "PASS" ] || die "데이터 보존 FAIL — 원본과 다른 테이블이 있습니다 (기록: $REPORT)"
+    ok "데이터 보존 PASS — 모든 테이블의 행 수와 내용이 원본과 같습니다 (기록: $REPORT)"
+    DATA_RESULT="PASS"
+elif [ "$HAVE_DB" = "1" ] && [ "$PKG_SKIP" = "0" ]; then
+    warn "패키지에 data-fingerprint.tsv 가 없어 데이터 보존을 판정하지 못합니다"
+fi
+
 # 데이터 단계 완료 표시 — 이후 단계에서 실패해 다시 돌려도 데이터는 건드리지 않습니다.
 if [ "$HAVE_PKG" = "1" ] && [ "$PKG_SKIP" = "0" ]; then
     printf '%s\n' "$PKG_ID" > "$APPLIED_MARK"
@@ -1240,10 +1267,9 @@ fi
 # -----------------------------------------------------------
 # 10. 기동
 # -----------------------------------------------------------
-log "10. 기동"
-phase compose:10-start
+phase_begin "기동"
 # ollama-init 이 모델(약 5GB)을 받는 동안 up 이 기다립니다(ai 의 depends_on).
-log "   서비스 기동 (최초에는 모델 다운로드로 수 분 걸립니다)"
+logt "서비스 기동 (최초에는 모델 다운로드로 수 분 걸립니다)"
 compose up -d --no-build \
     || die "기동 실패 — docker compose logs ollama-init · docker compose ps -a 를 확인하세요"
 
@@ -1277,7 +1303,7 @@ fi
 # 런타임 비교 (경고만) — 원본과 같은 Ollama 버전 · 모델로 떴는지.
 # 데이터가 아니라 "같은 조건에서 답하는가" 의 문제라 실패로 보지 않습니다.
 if [ "$HAVE_RT" = "1" ] && [ -f "$RESTORE_DIR/runtime-versions.txt" ]; then
-    log "   런타임 비교 (원본 ↔ 이 VM)"
+    logt "런타임 비교 (원본 ↔ 이 VM)"
     RT="$RESTORE_DIR/runtime-versions.txt"
     rt_ok=yes
     want_v="$(awk '$1=="ollama"{print $2}' "$RT")"
@@ -1302,7 +1328,7 @@ fi
 #   옵션을 실제 호출과 같게 num_ctx 4096 으로 맞춥니다 — 다르면 다시 올립니다.
 #   실패해도 기동은 성공으로 둡니다 — 첫 질문이 느릴 뿐 서비스는 정상입니다.
 if [ "${SKIP_WARMUP:-0}" != "1" ]; then
-    log "   모델 예열"
+    logt "모델 예열"
     WARM_PY='import json,os,sys,urllib.request
 m, t = sys.argv[1], int(sys.argv[2])
 base = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
@@ -1331,13 +1357,14 @@ fi
 #   이관 모드에서 켠 경우에도 응답 속도 FAIL 은 이관 실패로 보지 않습니다
 #   (VERIFY_GATE=0 — 네이티브 up.sh 와 같음).
 # -----------------------------------------------------------
-log "11. 검증"
-phase compose:11-verify
+phase_end
 VERIFY_GATE="${VERIFY_GATE:-$([ "$STRICT" = "1" ] && echo 0 || echo 1)}"
 VERIFY_RESULT="건너뜀"
 if [ "$SKIP_VERIFY" = "1" ] || { [ "$STRICT" = "1" ] && [ "$RUN_VERIFY" != "1" ]; }; then
+    echo
     ok "검증 건너뜀 — 수동 실행: bash $DEPLOY_DIR/verify.sh (verify 계정 · 채팅이 DB 에 남습니다)"
 else
+    phase_begin "검증"
     if FORM="${FORM:-docker-compose}" RUNS="${RUNS:-1}" \
        ALLOW_EMPTY_INDEX="${ALLOW_EMPTY_INDEX:-$([ "$HAVE_PKG" = "0" ] && echo 1 || echo 0)}" \
        bash "$DEPLOY_DIR/verify.sh"; then
@@ -1345,6 +1372,7 @@ else
     else
         VERIFY_RESULT="FAIL"
     fi
+    phase_end
 fi
 case "$VERIFY_RESULT" in
     PASS) status_set verify=PASS ;;
@@ -1352,35 +1380,27 @@ case "$VERIFY_RESULT" in
     *)    status_set verify=SKIPPED ;;
 esac
 
-echo
-compose ps --format 'table {{.Service}}\t{{.Status}}'
-echo
-log "결과"
-echo "  배포 커밋     : ${DEPLOY_COMMIT:0:7} ($([ "$STRICT" = "1" ] && echo '이관 모드' || echo '일반 배포'))"
-echo "  이미지 고정   : $(if grep -qs '@sha256:' docker-compose.lock.yml; then echo 'docker-compose.lock.yml (원본 digest)'; elif [ -f docker-compose.lock.yml ]; then echo "태그 ${IMAGE_TAG} + Ollama 원본 버전"; else echo "태그 ${IMAGE_TAG}"; fi)"
-echo "  데이터 보존   : $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("data_check","NA"))' "$STATUS_FILE" 2>/dev/null || echo NA)"
-echo "  검증          : $VERIFY_RESULT"
+TOTAL=$(( $(date +%s) - UP_START ))
 
-_finish() {
-    local s0; s0="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("start_epoch",""))' "$STATUS_FILE" 2>/dev/null || true)"
-    status_set state=success phase=done exit_code=0 finished_at="$(now_iso)" \
-               total_seconds="$([ -n "$s0" ] && echo $(( $(date +%s) - s0 )) || echo '')"
-}
+echo
+printf '%s━━ 요약 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$C_HEAD" "$C_OFF"
+for i in "${!PHASE_NAMES[@]}"; do
+    printf '  %-12s %4d초\n' "${PHASE_NAMES[$i]}" "${PHASE_SECS[$i]}"
+done
+printf '  %-12s %4d초\n' "합계" "$TOTAL"
+echo
+echo "  데이터 보존 : $DATA_RESULT"
+echo "  검증 결과 : $VERIFY_RESULT"
+echo "  Frontend  : http://127.0.0.1:${FRONTEND_PORT}"
+echo "  종료      : cd $DEPLOY_DIR && docker compose down"
+status_set total_seconds="$TOTAL"
+
+# 검증 결과 처리는 네이티브 up.sh 와 같습니다 — 이관 모드(VERIFY_GATE=0)에서는
+# 응답 검증 FAIL 을 이관 실패로 기록하지 않고 경고만 남깁니다.
+if [ "$VERIFY_RESULT" = "FAIL" ] && [ "$VERIFY_GATE" = "0" ]; then
+    warn "검증 FAIL — 이관(데이터 보존 · 기동)은 성공으로 끝냅니다. 원인: ~/lexai-run/results.csv"
+fi
 if [ "$VERIFY_RESULT" = "FAIL" ] && [ "$VERIFY_GATE" = "1" ]; then
     die "검증 FAIL — 위 항목과 docker compose logs 를 확인하세요"
 fi
-if [ "$VERIFY_RESULT" = "FAIL" ]; then
-    warn "검증 FAIL 이지만 이관 모드라 이관 실패로 기록하지 않습니다 (status.json verify=FAIL)"
-fi
-_finish
-
-echo
-log "배포 완료: $DEPLOY_DIR"
-echo "  상태   : cat ~/lexai-run/status.json"
-echo "  로그   : cd $DEPLOY_DIR && docker compose logs -f      (.env 의 COMPOSE_FILE 로 정의를 맞춰 둡니다)"
-echo "  종료   : cd $DEPLOY_DIR && docker compose down"
-echo "  재기동 : cd $DEPLOY_DIR && docker compose up -d --no-build"
-echo "  패키지 : STOP_WRITES=1 bash $DEPLOY_DIR/backup.sh       → ~/lexai-backup/latest"
-echo
-echo "  ※ 보안 그룹에서 ${FRONTEND_PORT} 을 열지 않았다면 SSH 터널로 접속하세요:"
-echo "      ssh -L 8080:localhost:${FRONTEND_PORT} <사용자>@<이 VM 의 IP>   → http://localhost:8080"
+status_set state=success phase=done exit_code=0 finished_at="$(now_iso)"
