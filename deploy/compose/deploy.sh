@@ -9,11 +9,14 @@
 #   1. 기본 도구 확보
 #   2. NVIDIA 드라이버 설치 → 재부팅 → 부팅 후 스스로 이어서 실행
 #   3. Docker 엔진 + nvidia-container-toolkit → 컨테이너 GPU 통과 검증
-#   4. compose 정의 수신 (파일 3개) — 저장소 clone 없음
+#   4. compose 정의 · 스크립트 수신 (커밋 SHA 고정) — 저장소 clone 없음
 #   5. .env 생성 — 시크릿 자동 발급
-#   6. 레지스트리에서 이미지 pull → 기동
-#   7. 이관 패키지가 있으면 DB · 색인 복원
-#   8. 헬스체크
+#   6. 이관 패키지가 있으면 검증 · 기존 설치 확인 · 스냅샷 배치
+#   7. 레지스트리에서 이미지 pull (패키지의 images.lock 이 있으면 같은 digest)
+#   8. 기동 전 DB 배치 · 데이터 지문 비교
+#   9. OpenSearch 만 먼저 띄워 색인 복원
+#  10. 전체 기동 · 준비 확인 · 런타임 비교 · 모델 예열
+#  11. verify.sh (이관 모드에서는 기본 생략)
 #
 # -----------------------------------------------------------
 # ★ 이 스크립트는 저장소와 독립적으로 동작합니다.
@@ -40,6 +43,16 @@
 #   SNAPSHOT_URI      이관 패키지 위치             s3://… 또는 https://…
 #   SKIP_DRIVER=1     드라이버 설치 건너뛰기 (GPU 이미지를 쓰는 경우)
 #   NO_START=1        준비만 하고 기동은 안 함
+#   NO_UPDATE=1       **이관 모드.** 옮겨 온 배포 디렉터리를 그대로 쓰고(GitHub 에서
+#                     다시 받지 않음), 패키지와 커밋 · 배포 파일 · 이미지 digest ·
+#                     체크섬 · 데이터 지문을 대조합니다. SNAPSHOT_URI 필수
+#   FORCE_CLEAN=1     기존 설치(데이터 볼륨)가 있어도 진행 — 기존 DB 는
+#                     ~/lexai-replaced/<시각> 으로 보관하고 데이터 볼륨을 새로 만듭니다
+#   RUN_VERIFY=1      이관 모드에서도 verify.sh 실행 (기본은 생략 — DB 에 기록이 남음)
+#   SKIP_VERIFY=1     verify.sh 생략
+#   TARGET_USER       root 로 실행될 때 사용할 계정 (기본 cb-user → uid 1000)
+#
+# 진행 상황(오케스트레이터용): ~/lexai-run/status.json — README 참고
 #
 # 예) 다른 CSP 의 레지스트리에서 받아 띄우기
 #   curl -fsSL <raw url> | REGISTRY_PREFIX=asia-northeast3-docker.pkg.dev/proj/repo \
@@ -47,6 +60,10 @@
 # ===========================================================
 
 set -euo pipefail
+
+# 시각은 KST 로 통일합니다(네이티브와 같음). DB 기록 · 로그 · status.json 이
+# 같은 시간대여야 비교하기 쉽습니다. VM 시스템 시간대는 바꾸지 않습니다.
+export TZ="${TZ:-Asia/Seoul}"
 
 # -----------------------------------------------------------
 # 무인 apt
@@ -113,6 +130,9 @@ BRANCH="${BRANCH:-feat/sqlite}"
 RAW_BASE="${REPO_RAW}/${BRANCH}"
 SELF_URL="${RAW_BASE}/deploy/compose/deploy.sh"
 
+# ★ 사용자가 준 값을 따로 기억합니다. root 로 실행되면 아래 기본값이 /root/... 가
+#   되는데, 대상 사용자로 넘어갈 때 그 값을 그대로 넘기면 남의 홈에 쓰려다 실패합니다.
+DEPLOY_DIR_GIVEN="${DEPLOY_DIR:-}"
 DEPLOY_DIR="${DEPLOY_DIR:-$HOME/lexai-compose}"
 RESUME_UNIT="lexai-compose-resume"
 DRIVER_TRIES_FILE="$HOME/.lexai-driver-tries"
@@ -122,13 +142,27 @@ DRIVER_MAX_TRIES="${DRIVER_MAX_TRIES:-2}"
 #   형태별 VM 을 권장하지만 실제로 겹치는 일이 생겨 이름을 나눕니다.
 SECRET_FILE="$HOME/.lexai-secrets.compose"
 
+# ★ 명시하지 않았으면 기존 .env 의 값을 씁니다. 예전에는 여기서 기본값을
+#   export 해서, .env 에 다른 태그를 적어도 셸 환경변수가 이겨 조용히 무시됐습니다.
+_env_from_file() {
+    [ -f "$DEPLOY_DIR/.env" ] || return 0
+    { grep -E "^$1=" "$DEPLOY_DIR/.env" | tail -1 | cut -d= -f2-; } 2>/dev/null || true
+}
+REGISTRY_PREFIX="${REGISTRY_PREFIX:-$(_env_from_file REGISTRY_PREFIX)}"
 REGISTRY_PREFIX="${REGISTRY_PREFIX:-yunhwa0905}"
+IMAGE_TAG="${IMAGE_TAG:-$(_env_from_file IMAGE_TAG)}"
 IMAGE_TAG="${IMAGE_TAG:-v2}"
+REPO_API="${REPO_API:-https://api.github.com/repos/${REPO_RAW#https://raw.githubusercontent.com/}}"
+REPO_GIT="${REPO_GIT:-https://github.com/${REPO_RAW#https://raw.githubusercontent.com/}.git}"
 INDEX_NAME="${INDEX_NAME:-legal_documents}"
 SNAPSHOT_REPO="${SNAPSHOT_REPO:-lexai}"
 
 RESUME=0
 NO_START="${NO_START:-0}"
+NO_UPDATE="${NO_UPDATE:-0}"
+FORCE_CLEAN="${FORCE_CLEAN:-0}"
+RUN_VERIFY="${RUN_VERIFY:-0}"
+SKIP_VERIFY="${SKIP_VERIFY:-0}"
 for arg in "${@:-}"; do
     case "$arg" in
         --resume)   RESUME=1 ;;
@@ -150,7 +184,11 @@ fi
 log()  { printf '%s[compose]%s %s\n' "$C_HEAD" "$C_OFF" "$*"; }
 ok()   { printf '%s  OK%s   %s\n' "$C_OK" "$C_OFF" "$*"; }
 warn() { printf '%s  WARN%s %s\n' "$C_WARN" "$C_OFF" "$*" >&2; }
-die()  { printf '%s  FATAL%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
+die()  {
+    printf '%s  FATAL%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2
+    if type status_set >/dev/null 2>&1; then status_set "last_error=$*"; fi
+    exit 1
+}
 
 
 # -----------------------------------------------------------
@@ -163,8 +201,15 @@ die()  { printf '%s  FATAL%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
 # -----------------------------------------------------------
 if [ "$(id -u)" -eq 0 ] && [ "${LEXAI_REEXEC:-0}" != "1" ]; then
     _user="${TARGET_USER:-${SUDO_USER:-}}"
+    # ★ cb-user(Tumblebug · Beetle 이 만드는 VM 의 계정)를 먼저 봅니다. AWS Deep
+    #   Learning AMI 에서는 uid 1000 이 ubuntu 라, uid 1000 부터 보면 엉뚱한
+    #   계정에 설치되고 리모트 커맨드(cb-user)에서는 보이지 않습니다.
     if [ -z "$_user" ] || [ "$_user" = "root" ]; then
-        _user="$( { getent passwd 1000 | cut -d: -f1; } || true )"
+        if getent passwd cb-user >/dev/null 2>&1; then
+            _user="cb-user"
+        else
+            _user="$( { getent passwd 1000 | cut -d: -f1; } || true )"
+        fi
     fi
     [ -n "$_user" ] || die "일반 사용자를 찾지 못했습니다. TARGET_USER 로 지정하세요."
 
@@ -177,10 +222,15 @@ if [ "$(id -u)" -eq 0 ] && [ "${LEXAI_REEXEC:-0}" != "1" ]; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates openssl
     fi
 
-    _dir="${DEPLOY_DIR:-$_home/lexai-compose}"
-    sudo -u "$_user" -H mkdir -p "$_dir"
-    sudo -u "$_user" -H curl -fsSL "$SELF_URL" -o "$_dir/deploy.sh"
-    chmod +x "$_dir/deploy.sh"
+    _dir="${DEPLOY_DIR_GIVEN:-$_home/lexai-compose}"
+    if [ "$NO_UPDATE" = "1" ]; then
+        # 이관 모드: 옮겨 온 사본을 그대로 씁니다(받으면 브랜치 최신본이 됩니다).
+        [ -f "$_dir/deploy.sh" ] || die "NO_UPDATE=1 인데 옮겨 온 배포 디렉터리가 없습니다: $_dir"
+    else
+        sudo -u "$_user" -H mkdir -p "$_dir"
+        sudo -u "$_user" -H curl -fsSL "$SELF_URL" -o "$_dir/deploy.sh"
+        chmod +x "$_dir/deploy.sh"
+    fi
 
     _args=()
     if [ "$RESUME" = "1" ]; then _args+=(--resume); fi
@@ -192,6 +242,13 @@ if [ "$(id -u)" -eq 0 ] && [ "${LEXAI_REEXEC:-0}" != "1" ]; then
         BRANCH="$BRANCH" DEPLOY_DIR="$_dir" \
         REGISTRY_PREFIX="$REGISTRY_PREFIX" IMAGE_TAG="$IMAGE_TAG" \
         SNAPSHOT_URI="${SNAPSHOT_URI:-}" SKIP_DRIVER="${SKIP_DRIVER:-0}" \
+        NO_UPDATE="$NO_UPDATE" FORCE_CLEAN="$FORCE_CLEAN" \
+        RUN_VERIFY="$RUN_VERIFY" SKIP_VERIFY="$SKIP_VERIFY" \
+        ALLOW_HOST_OLLAMA="${ALLOW_HOST_OLLAMA:-0}" \
+        TEMPERATURE="${TEMPERATURE:-}" LLM_SEED="${LLM_SEED:-}" \
+        FRONTEND_PORT="${FRONTEND_PORT:-}" SKIP_WARMUP="${SKIP_WARMUP:-0}" \
+        ${VERIFY_GATE:+VERIFY_GATE="$VERIFY_GATE"} \
+        REPO_RAW="$REPO_RAW" ${REPO_GIT:+REPO_GIT="$REPO_GIT"} \
         bash "$_dir/deploy.sh" "${_args[@]:-}"
 fi
 
@@ -220,6 +277,12 @@ fi
 # 스크립트를 조금씩 읽어가므로, 실행 중인 파일을 덮어쓰면 남은 부분이
 # 깨집니다.
 # -----------------------------------------------------------
+# ★ 이관 모드(NO_UPDATE=1)에서는 갱신하지 않습니다. 옮겨 온 사본을 받으면
+#   브랜치 최신본으로 바뀌어 원본에 배포돼 있던 버전과 달라집니다.
+if [ "$NO_UPDATE" = "1" ] && [ "${LEXAI_FROMFILE:-0}" != "1" ]; then
+    [ -f "$DEPLOY_DIR/deploy.sh" ] || die "NO_UPDATE=1 인데 옮겨 온 배포 디렉터리가 없습니다: $DEPLOY_DIR"
+    export LEXAI_FROMFILE=1
+fi
 if [ "${LEXAI_FROMFILE:-0}" != "1" ]; then
     if ! command -v curl >/dev/null 2>&1; then
         apt_q update -qq
@@ -239,8 +302,53 @@ if [ "${LEXAI_FROMFILE:-0}" != "1" ]; then
     export LEXAI_FROMFILE=1
     export BRANCH DEPLOY_DIR REGISTRY_PREFIX IMAGE_TAG INDEX_NAME SNAPSHOT_REPO
     export SNAPSHOT_URI="${SNAPSHOT_URI:-}" SKIP_DRIVER="${SKIP_DRIVER:-0}"
+    export NO_UPDATE FORCE_CLEAN RUN_VERIFY SKIP_VERIFY
     exec bash "$DEPLOY_DIR/deploy.sh" "${@:-}" </dev/null
 fi
+
+
+# -----------------------------------------------------------
+# 상태 파일 (오케스트레이터용)
+#
+# 배포 · 이관은 수십 분 걸려 백그라운드로 띄울 수밖에 없고, 그러면 호출한
+# 쪽은 종료 코드를 받지 못합니다. 대신 ~/lexai-run/status.json 을 폴링합니다.
+# 형식은 네이티브(deploy/native/common.sh status_set)와 같고 form 만 다릅니다.
+# -----------------------------------------------------------
+RUN_DIR="${RUN_DIR:-$HOME/lexai-run}"
+STATUS_FILE="$RUN_DIR/status.json"
+status_set() {  # status_set 키=값 ...
+    mkdir -p "$RUN_DIR" 2>/dev/null || return 0
+    python3 - "$STATUS_FILE" "$@" <<'PY' 2>/dev/null || true
+import json, os, sys, time
+path = sys.argv[1]
+try:
+    data = json.load(open(path))
+except Exception:
+    data = {}
+for kv in sys.argv[2:]:
+    k, _, v = kv.partition("=")
+    data[k] = v
+data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(data, f, ensure_ascii=False, indent=1)
+os.replace(tmp, path)
+PY
+}
+now_iso() { date '+%Y-%m-%dT%H:%M:%S%z'; }
+CUR_PHASE="compose:1-tools"
+phase() { CUR_PHASE="$1"; status_set state=running phase="$1"; }
+
+if [ "$RESUME" = "1" ]; then
+    status_set state=running phase=compose:resume
+else
+    rm -f "$STATUS_FILE"
+    status_set run_id="$(date +%Y%m%d-%H%M%S)" form=compose \
+               operation="$([ "$NO_UPDATE" = "1" ] && echo migrate || echo deploy)" \
+               state=running phase=compose:1-tools started_at="$(now_iso)" start_epoch="$(date +%s)" \
+               force_clean="$FORCE_CLEAN" data_check=NA verify=NA
+fi
+trap '_rc=$?; if [ "$_rc" -ne 0 ]; then status_set state=failed exit_code="$_rc" failed_phase="$CUR_PHASE" finished_at="$(now_iso)"; fi' EXIT
 
 
 # -----------------------------------------------------------
@@ -251,10 +359,10 @@ silence_needrestart
 # ★ lspci 가 빠지면 안 됩니다 — 2절이 GPU 유무를 lspci 로 판정하는데,
 #   명령이 없으면 출력이 비어 "GPU 없음"으로 읽히고 드라이버 설치를 건너뜁니다.
 need=""
-for c in curl openssl lspci; do command -v "$c" >/dev/null 2>&1 || need="$need $c"; done
+for c in curl openssl lspci git python3; do command -v "$c" >/dev/null 2>&1 || need="$need $c"; done
 if [ -n "$need" ]; then
     apt_q update -qq
-    apt_q install -y curl openssl ca-certificates pciutils
+    apt_q install -y curl openssl ca-certificates pciutils git python3
 fi
 ok "배포 디렉터리: $DEPLOY_DIR"
 
@@ -268,6 +376,7 @@ ok "배포 디렉터리: $DEPLOY_DIR"
 # 진행 상황: journalctl -u lexai-compose-resume -f
 # -----------------------------------------------------------
 log "2. GPU 드라이버"
+phase compose:2-driver
 if [ "${SKIP_DRIVER:-0}" = "1" ]; then
     ok "SKIP_DRIVER=1 — 건너뜀"
 elif gpu_ready; then
@@ -317,6 +426,17 @@ Environment=REGISTRY_PREFIX=$REGISTRY_PREFIX
 Environment=IMAGE_TAG=$IMAGE_TAG
 Environment=SNAPSHOT_URI=${SNAPSHOT_URI:-}
 Environment=NO_START=$NO_START
+# ★ 여기 적지 않은 값은 재부팅 뒤 사라집니다(이관 모드가 일반 배포로 바뀌는 등).
+Environment=NO_UPDATE=$NO_UPDATE
+Environment=FORCE_CLEAN=$FORCE_CLEAN
+Environment=RUN_VERIFY=$RUN_VERIFY
+Environment=SKIP_VERIFY=$SKIP_VERIFY
+Environment=ALLOW_HOST_OLLAMA=${ALLOW_HOST_OLLAMA:-0}
+Environment=TEMPERATURE=${TEMPERATURE:-}
+Environment=LLM_SEED=${LLM_SEED:-}
+Environment=FRONTEND_PORT=${FRONTEND_PORT:-}
+Environment=SKIP_WARMUP=${SKIP_WARMUP:-0}
+Environment=LEXAI_FROMFILE=1
 ExecStart=$DEPLOY_DIR/deploy.sh --resume
 
 [Install]
@@ -327,6 +447,7 @@ EOF
 
     warn "재부팅합니다. 재접속 후 아래로 진행 상황을 확인하세요:"
     warn "  journalctl -u ${RESUME_UNIT} -f"
+    status_set state=rebooting phase=compose:2-driver
     sleep 3
     sudo reboot
     exit 0
@@ -348,6 +469,7 @@ fi
 # 컨테이너를 하나 띄워 확인합니다.
 # -----------------------------------------------------------
 log "3. Docker"
+phase compose:3-docker
 if ! command -v docker >/dev/null 2>&1; then
     curl -fsSL https://get.docker.com | sudo sh
     sudo usermod -aG docker "$(id -un)"
@@ -443,30 +565,62 @@ fi
 #   deploy/snapshots/             OpenSearch path.repo — 색인 복원 위치
 # -----------------------------------------------------------
 log "4. compose 정의"
+phase compose:4-files
 mkdir -p "$DEPLOY_DIR/deploy/snapshots"
 
-fetch_raw() {  # fetch_raw <저장소 상대경로>
-    curl -fsSL "${RAW_BASE}/$1" -o "$DEPLOY_DIR/$1" \
-        || die "받지 못했습니다: ${RAW_BASE}/$1"
-}
-fetch_raw "docker-compose.yml"
-fetch_raw "docker-compose.registry.yml"
-fetch_raw "deploy/schema.sqlite.sql"
+# 배포 디렉터리에 두는 파일 — 이관 패키지의 deploy-files.sha256 도 이 목록입니다.
+DEPLOY_FILES="docker-compose.yml docker-compose.registry.yml deploy/schema.sqlite.sql deploy.sh backup.sh verify.sh datacheck.sh"
 
-# 검증 스크립트도 함께 받습니다. 타겟에 저장소가 없으므로 네이티브의
-# verify.sh 를 쓸 수 없고, 같은 항목을 같은 형식으로 판정하는 전용본이
-# 필요합니다 — 두 형태의 수치를 한 CSV 에서 비교하기 위해서입니다.
-curl -fsSL "${RAW_BASE}/deploy/compose/verify.sh" -o "$DEPLOY_DIR/verify.sh" \
-    && chmod +x "$DEPLOY_DIR/verify.sh" \
-    || warn "verify.sh 를 받지 못했습니다 — 자동 판정은 건너뜁니다"
+if [ "$NO_UPDATE" = "1" ]; then
+    # 이관 모드: 옮겨 온 파일만 씁니다. 하나라도 없으면 멈춥니다.
+    for f in $DEPLOY_FILES DEPLOY_COMMIT; do
+        [ -f "$DEPLOY_DIR/$f" ] || die "NO_UPDATE=1 인데 옮겨 온 배포 디렉터리에 $f 가 없습니다 ($DEPLOY_DIR)"
+    done
+    DEPLOY_COMMIT="$(tr -d '[:space:]' < "$DEPLOY_DIR/DEPLOY_COMMIT")"
+    ok "NO_UPDATE=1 — 옮겨 온 정의 사용 (커밋 ${DEPLOY_COMMIT:0:7})"
+else
+    # -----------------------------------------------------------
+    # ★ 브랜치 이름이 아니라 커밋 SHA 로 받습니다.
+    #   브랜치는 움직이므로, 이름으로 받으면 언제 받았느냐에 따라 내용이
+    #   달라지고 무엇을 받았는지 기록도 남지 않습니다. SHA 를 먼저 정하고
+    #   그 SHA 의 파일을 받아 DEPLOY_COMMIT 에 적어 둡니다 — 이관 패키지가
+    #   이 값을 실어 나르고, 대상은 같은 값인지 대조합니다.
+    # -----------------------------------------------------------
+    # git ls-remote 는 요청 횟수 제한이 없어 먼저 씁니다(GitHub API 는 IP 당 시간 60회).
+    DEPLOY_COMMIT="$( { git ls-remote "$REPO_GIT" "refs/heads/${BRANCH}" 2>/dev/null | cut -f1; } || true )"
+    if ! printf '%s' "$DEPLOY_COMMIT" | grep -qE '^[0-9a-f]{40}$'; then
+        DEPLOY_COMMIT="$(curl -fsSL -H 'Accept: application/vnd.github.sha' "${REPO_API}/commits/${BRANCH}" 2>/dev/null || true)"
+    fi
+    if printf '%s' "$DEPLOY_COMMIT" | grep -qE '^[0-9a-f]{40}$'; then
+        FETCH_BASE="${REPO_RAW}/${DEPLOY_COMMIT}"
+        ok "브랜치 ${BRANCH} → 커밋 ${DEPLOY_COMMIT:0:7}"
+    else
+        DEPLOY_COMMIT="unknown"
+        FETCH_BASE="$RAW_BASE"
+        warn "커밋을 확인하지 못해 브랜치 최신본을 받습니다 (GitHub API 제한 등) — 커밋 대조가 불가능합니다"
+    fi
 
-# 이 형태가 이관의 소스가 되는 경우를 위해 패키지 생성 스크립트도 함께
-# 받습니다. 없으면 컴포즈로 운영 중인 환경에서 패키지를 뜰 수단이 없습니다.
-curl -fsSL "${RAW_BASE}/deploy/compose/backup.sh" -o "$DEPLOY_DIR/backup.sh" \
-    && chmod +x "$DEPLOY_DIR/backup.sh" \
-    || warn "backup.sh 를 받지 못했습니다 — 이 형태에서 패키지를 뜰 수 없습니다"
-
-ok "파일 5개 수신 (브랜치 $BRANCH)"
+    fetch_raw() {  # fetch_raw <저장소 상대경로> <배포 디렉터리 상대경로>
+        curl -fsSL "${FETCH_BASE}/$1" -o "$DEPLOY_DIR/$2.new" \
+            || die "받지 못했습니다: ${FETCH_BASE}/$1"
+        mv "$DEPLOY_DIR/$2.new" "$DEPLOY_DIR/$2"
+    }
+    fetch_raw "docker-compose.yml"            "docker-compose.yml"
+    fetch_raw "docker-compose.registry.yml"   "docker-compose.registry.yml"
+    fetch_raw "deploy/schema.sqlite.sql"      "deploy/schema.sqlite.sql"
+    # 검증 · 패키지 · 데이터 지문 스크립트 — 타겟에 저장소가 없으므로 함께 둡니다.
+    fetch_raw "deploy/compose/verify.sh"      "verify.sh"
+    fetch_raw "deploy/compose/backup.sh"      "backup.sh"
+    fetch_raw "deploy/compose/datacheck.sh"   "datacheck.sh"
+    chmod +x "$DEPLOY_DIR/verify.sh" "$DEPLOY_DIR/backup.sh" "$DEPLOY_DIR/datacheck.sh"
+    # deploy.sh 자신도 같은 커밋의 사본으로 맞춥니다(위 0절은 브랜치로 받았습니다).
+    # 실행 중인 파일을 덮어쓰면 bash 가 남은 부분을 깨뜨려 읽으므로, 다음 실행부터
+    # 적용되도록 이름을 바꿔 원자적으로 교체합니다(실행 중인 inode 는 그대로).
+    if [ "$DEPLOY_COMMIT" != "unknown" ]; then fetch_raw "deploy/compose/deploy.sh" "deploy.sh"; chmod +x "$DEPLOY_DIR/deploy.sh"; fi
+    printf '%s\n' "$DEPLOY_COMMIT" > "$DEPLOY_DIR/DEPLOY_COMMIT"
+    ok "파일 7개 수신 (커밋 ${DEPLOY_COMMIT:0:7})"
+fi
+status_set commit="$DEPLOY_COMMIT"
 
 
 # -----------------------------------------------------------
@@ -476,8 +630,11 @@ ok "파일 5개 수신 (브랜치 $BRANCH)"
 # 비밀번호가 바뀌면 기존 OpenSearch 볼륨에 접속하지 못합니다.
 # -----------------------------------------------------------
 log "5. 환경 파일"
+phase compose:5-env
 ENV_FILE="$DEPLOY_DIR/.env"
 if [ -f "$ENV_FILE" ]; then
+    # 옮겨 오는 과정에서 권한이 풀렸을 수 있습니다(시크릿 파일).
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
     ok "이미 존재 — 건너뜀"
 else
     # HS256 이라 32바이트 이상이어야 합니다.
@@ -511,6 +668,9 @@ LLM_SEED=${LLM_SEED:--1}
 
 REGISTRY_PREFIX=$REGISTRY_PREFIX
 IMAGE_TAG=$IMAGE_TAG
+
+# 프론트엔드를 여는 호스트 포트
+FRONTEND_PORT=${FRONTEND_PORT:-80}
 EOF
     chmod 600 "$ENV_FILE"
 
@@ -520,25 +680,160 @@ EOF
     chmod 600 "$SECRET_FILE"
 
     ok "생성 — 시크릿 2종 자동 발급"
-    warn "시크릿 사본: $SECRET_FILE (이관 시 대상 환경에 같은 값을 넣어야 합니다)"
+    ok "시크릿 사본: $SECRET_FILE (배포 디렉터리째 이관하면 .env 가 함께 옮겨집니다)"
 fi
+
 
 # 뒤에서 OpenSearch 에 붙을 때 씁니다.
 OS_PW="$(grep -E '^OPENSEARCH_PASSWORD=' "$ENV_FILE" | tail -1 | cut -d= -f2-)"
+[ -n "$OS_PW" ] || die ".env 에 OPENSEARCH_PASSWORD 가 없습니다: $ENV_FILE"
+
+
+# -----------------------------------------------------------
+# 공통 도구 (6절 이후)
+# -----------------------------------------------------------
+cd "$DEPLOY_DIR"
+
+# ★ 이관 모드(NO_UPDATE=1)는 검증을 하나도 건너뛰지 않습니다. 패키지 · 커밋 ·
+#   배포 파일 · 이미지 digest · 데이터 지문 중 하나라도 어긋나면 "데이터가
+#   보존됐다" 는 결론을 낼 수 없으므로 멈춥니다(네이티브 bootstrap.sh 와 같음).
+STRICT="$NO_UPDATE"
+
+FRONTEND_PORT="${FRONTEND_PORT:-$(_env_from_file FRONTEND_PORT)}"
+FRONTEND_PORT="${FRONTEND_PORT:-80}"
+export FRONTEND_PORT
+
+SNAP_DIR="$DEPLOY_DIR/deploy/snapshots"
+# 패키지에서 꺼낸 작은 파일(DB · 지문 · 런타임 기록)을 두는 곳. 컨테이너에
+# 마운트해서 쓰므로 심볼릭 링크가 아니라 실제 파일이어야 합니다.
+RESTORE_DIR="$DEPLOY_DIR/.restore"
+# 마지막으로 적용을 끝낸 패키지(checksums.sha256 의 해시). 같은 패키지로
+# 다시 실행하면 데이터 단계를 건너뜁니다 — 재시도가 데이터를 건드리지 않게.
+APPLIED_MARK="$DEPLOY_DIR/.package-applied"
+# opensearchproject/opensearch 이미지의 실행 계정. 스냅샷 디렉터리(바인드
+# 마운트)에 쓰려면 이 uid 가 소유해야 합니다.
+OS_UID=1000
+
+# ★ 기본 compose 파일 목록. 이관 패키지로 이미지를 고정하면 lock 파일이,
+#   사용자가 덮어쓸 값이 있으면 override 파일이 뒤에 붙습니다.
+#   (-f 를 주면 docker-compose.override.yml 은 자동으로 읽히지 않아 직접 붙입니다)
+compose_files() {
+    local f="docker-compose.yml:docker-compose.registry.yml"
+    [ -f docker-compose.lock.yml ] && f="$f:docker-compose.lock.yml"
+    [ -f docker-compose.override.yml ] && f="$f:docker-compose.override.yml"
+    printf '%s' "$f"
+}
+# ★ 환경변수(COMPOSE_FILE=…)로 넘기면 안 됩니다 — DOCKER 가 "sudo docker" 이면
+#   sudo 가 환경을 지워 registry 오버레이 없이 실행됩니다. -f 로 넘깁니다.
+compose() {
+    local a=() f fs
+    IFS=: read -ra fs <<< "$(compose_files)"
+    for f in "${fs[@]}"; do a+=(-f "$f"); done
+    $DOCKER compose "${a[@]}" "$@"
+}
+
+# .env 의 COMPOSE_FILE 을 실제 목록과 맞춥니다. 그래야 사람이 배포 디렉터리에서
+# 그냥 `docker compose ps` · `docker compose logs` 를 쳐도 같은 정의를 봅니다
+# (registry 오버레이가 빠지면 build: 가 살아나 소스 없는 VM 에서 빌드를 시도합니다).
+_env_set() {  # _env_set <키> <값> — .env 의 한 줄을 맞춥니다(없으면 추가)
+    local want="$1=$2"
+    if grep -qE "^$1=" "$ENV_FILE"; then
+        grep -qxF "$want" "$ENV_FILE" || sed -i "s#^$1=.*#${want}#" "$ENV_FILE"
+    else
+        printf '%s\n' "$want" >> "$ENV_FILE"
+    fi
+}
+sync_compose_file_env() {
+    if ! grep -qE '^COMPOSE_FILE=' "$ENV_FILE"; then
+        printf '\n# 배포 디렉터리에서 docker compose 를 그냥 쳐도 같은 정의를 쓰도록 deploy.sh 가 관리합니다\n' >> "$ENV_FILE"
+    fi
+    _env_set COMPOSE_FILE "$(compose_files)"
+    # 셸에서 준 포트가 compose(.env 를 읽음)에도 그대로 적용되게 맞춥니다.
+    _env_set FRONTEND_PORT "$FRONTEND_PORT"
+}
+
+# trun [-v 호스트:컨테이너 ...] '<bash 명령>'
+# tomcat 이미지(sqlite3 · bash 포함)로 lexai_data 볼륨에 일회성 컨테이너를 붙입니다.
+# 서비스를 띄우지 않고도 볼륨 안의 DB 를 다룰 수 있습니다.
+trun() {
+    local vols=()
+    while [ "$#" -gt 1 ] && [ "$1" = "-v" ]; do vols+=(-v "$2"); shift 2; done
+    compose run --rm --no-deps -T "${vols[@]}" --entrypoint bash tomcat -c "$1" </dev/null
+}
+
+PROJECT="$( { compose config --format json 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])'; } 2>/dev/null || true )"
+[ -n "$PROJECT" ] || PROJECT="$(basename "$DEPLOY_DIR" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-')"
+vol_exists() { $DOCKER volume inspect "${PROJECT}_$1" >/dev/null 2>&1; }
+
+# ★ </dev/null 은 필수입니다 — docker compose exec 는 -T 여도 stdin 을 읽습니다.
+os() { compose exec -T opensearch curl -sk -u "admin:${OS_PW}" "$@" </dev/null; }
+OS_BASE="https://127.0.0.1:9200"
+os_count() { { os "$OS_BASE/${INDEX_NAME}/_count" | grep -o '"count":[0-9]*' | cut -d: -f2; } 2>/dev/null || true; }
+os_code()  { { os -o /dev/null -w '%{http_code}' "$OS_BASE/${INDEX_NAME}"; } 2>/dev/null || echo 000; }
+
+svc_health() {
+    local cid; cid="$( { compose ps -q "$1" 2>/dev/null | head -1; } || true )"
+    [ -n "$cid" ] || { echo none; return 0; }
+    $DOCKER inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" 2>/dev/null || echo none
+}
+wait_healthy() {  # wait_healthy <서비스> <초>
+    local deadline=$(( $(date +%s) + $2 )) h
+    while :; do
+        h="$(svc_health "$1")"
+        if [ "$h" = "healthy" ]; then return 0; fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then return 1; fi
+        sleep 5
+    done
+}
+
+# 기존 사용자의 배포 디렉터리라도 스냅샷 폴더는 OpenSearch(uid 1000)가 써야
+# 합니다. Tumblebug VM 의 cb-user 는 uid 1000 이 아닌 경우가 많아(Ubuntu AMI 는
+# ubuntu 가 1000) 그대로 두면 backup.sh 의 스냅샷 생성이 권한 오류로 실패합니다.
+own_snapdir() {
+    mkdir -p "$SNAP_DIR" 2>/dev/null || sudo mkdir -p "$SNAP_DIR"
+    if [ "$(stat -c %u "$SNAP_DIR")" != "$OS_UID" ] || [ -n "$(find "$SNAP_DIR" ! -uid "$OS_UID" -print -quit 2>/dev/null)" ]; then
+        sudo chown -R "$OS_UID:$OS_UID" "$SNAP_DIR"
+    fi
+}
 
 
 # -----------------------------------------------------------
 # 6. 이관 패키지
 #
-# 색인 스냅샷을 deploy/snapshots 에 풀어둡니다. OpenSearch 컨테이너가
-# 이 디렉터리를 /mnt/snapshots (path.repo) 로 마운트하므로, 기동 후
-# 복원 API 가 바로 읽을 수 있습니다.
+# 받아서 검증만 하고, 데이터에 손대는 일은 이미지를 받은 뒤(8절~)에 합니다.
+# 검증 순서는 싼 것부터 — 커밋 · 배포 파일 · 이미지 digest 가 틀리면 수 GB
+# 아카이브를 볼 필요도 없습니다.
+#
+#   checksums.sha256       아래 파일 전부의 SHA-256
+#   source-commit.txt      원본 배포의 커밋(DEPLOY_COMMIT)
+#   deploy-files.sha256    원본 배포 디렉터리의 정의 · 스크립트 해시
+#   images.lock            원본에서 실제로 돌던 이미지 digest (서비스별)
+#   opensearch-snapshots.tar.gz  색인 스냅샷 (안에 contents.tsv)
+#   lexai.db               SQLite (VACUUM INTO)
+#   data-fingerprint.tsv   테이블별 행 수 · 내용 해시
+#   runtime-versions.txt   Ollama 버전 · 모델 ID
+#
+# 네이티브 패키지(deploy/native/backup.sh)도 받습니다 — 형태 간 이관.
+# 그 경우 images.lock · deploy-files.sha256 이 없으므로 이관 모드가 아닌
+# 일반 배포(NO_UPDATE 없이)로 실행합니다.
 # -----------------------------------------------------------
 log "6. 이관 패키지"
+phase compose:6-package
+HAVE_PKG=0; PKG_SKIP=0; HAVE_DB=0; HAVE_FP=0; HAVE_RT=0; PKG_ID=""
+
 if [ -z "${SNAPSHOT_URI:-}" ]; then
+    [ "$STRICT" = "1" ] && die "NO_UPDATE=1 (이관 모드) 에는 SNAPSHOT_URI 가 필요합니다 — backup.sh 패키지 경로(예: ~/lexai-backup/latest)를 지정하세요"
     ok "SNAPSHOT_URI 미지정 — 건너뜀 (색인 없이 뜨면 답변에 근거가 없습니다)"
+    if [ -f docker-compose.lock.yml ]; then
+        rm -f docker-compose.lock.yml
+        ok "이전 이관의 이미지 고정(docker-compose.lock.yml)을 해제했습니다 — 태그 ${IMAGE_TAG} 기준으로 받습니다"
+    fi
 else
-    tmp="$(mktemp -d)"
+    HAVE_PKG=1
+    rm -rf "$RESTORE_DIR"
+    mkdir -p "$RESTORE_DIR"
+    tmp="$RESTORE_DIR"
 
     # ★ 순정 Ubuntu 이미지에는 클라우드 CLI 가 없습니다. 이관 도구가 부르는
     #   무인 실행이라 "직접 설치하세요" 로 끝내면 거기서 멈춥니다.
@@ -558,248 +853,534 @@ else
             gs://*)   ensure_cli gsutil google-cloud-cli "https://cloud.google.com/sdk/docs/install 참고 (apt 저장소 등록 필요)"
                       gsutil -q cp "$1" "$2" ;;
             http*)    curl -fsSL "$1" -o "$2" ;;
-            *)        cp "$1" "$2" ;;
+            # ★ 로컬 경로(Beetle 로 옮겨 온 패키지)는 복사하지 않고 링크합니다.
+            #   수 GB 아카이브를 한 번 더 복사하면 디스크를 두 배로 쓰고 시간도 그만큼 듭니다.
+            *)        [ -f "$1" ] || return 1
+                      ln -s "$(readlink -f "$1")" "$2" ;;
         esac
     }
+    # 컨테이너에 마운트할 작은 파일은 링크를 실제 파일로 바꿉니다
+    # (링크 대상은 마운트 밖이라 컨테이너에서 깨집니다).
+    materialize() { if [ -L "$1" ]; then cp --remove-destination "$(readlink -f "$1")" "$1"; fi; }
 
-    log "   내려받는 중: $SNAPSHOT_URI"
-    fetch "${SNAPSHOT_URI%/}/opensearch-snapshots.tar.gz" "$tmp/opensearch-snapshots.tar.gz"
-
-    # 전송 손상을 압축 풀기 전에 잡습니다. 깨진 아카이브를 풀어봐야
-    # 뒤에서 더 알기 어려운 형태로 실패할 뿐입니다.
-    if fetch "${SNAPSHOT_URI%/}/checksums.sha256" "$tmp/checksums.sha256" 2>/dev/null; then
-        if ( cd "$tmp" && grep "opensearch-snapshots.tar.gz" checksums.sha256 | sha256sum -c --quiet ); then
-            ok "아카이브 체크섬 확인"
-        else
-            die "아카이브 체크섬 불일치 — 전송이 온전하지 않습니다"
+    _sum_re() { printf '[[:space:]]\\*?(\\./)?%s$' "$(printf '%s' "$1" | sed 's/\./\\./g')"; }
+    has_sum()   { [ -f "$tmp/checksums.sha256" ] && grep -qE "$(_sum_re "$1")" "$tmp/checksums.sha256"; }
+    check_sum() { ( cd "$tmp" && grep -E "$(_sum_re "$1")" checksums.sha256 | sha256sum -c --quiet ) >/dev/null 2>&1; }
+    # need <파일> <필수 여부 1|0> — 받고 체크섬까지 확인. 없으면 1 을 돌려줍니다.
+    need() {
+        if ! fetch "${SNAPSHOT_URI%/}/$1" "$tmp/$1" 2>/dev/null; then
+            rm -f "$tmp/$1"
+            [ "$2" = "1" ] && die "패키지에 $1 이 없습니다 — 이관 모드에서는 필수입니다 (지금 버전의 backup.sh 로 다시 만드세요)"
+            return 1
         fi
+        if has_sum "$1"; then
+            check_sum "$1" || die "$1 체크섬 불일치 — 전송이 온전하지 않습니다"
+        elif [ "$2" = "1" ]; then
+            die "checksums.sha256 에 $1 항목이 없습니다"
+        elif [ -f "$tmp/checksums.sha256" ]; then
+            warn "checksums.sha256 에 $1 항목이 없어 확인을 건너뜁니다"
+        fi
+        return 0
+    }
+
+    log "   패키지: $SNAPSHOT_URI"
+    if fetch "${SNAPSHOT_URI%/}/checksums.sha256" "$tmp/checksums.sha256" 2>/dev/null; then
+        materialize "$tmp/checksums.sha256"
+        PKG_ID="$(sha256sum "$tmp/checksums.sha256" | cut -c1-64)"
     else
-        warn "checksums.sha256 이 없어 아카이브 체크섬 확인을 건너뜁니다"
+        rm -f "$tmp/checksums.sha256"
+        [ "$STRICT" = "1" ] && die "checksums.sha256 이 없습니다 — 이관 모드에서는 무결성 검증 없이 진행하지 않습니다"
+        warn "checksums.sha256 이 없어 체크섬 확인을 건너뜁니다"
+        PKG_ID="nochecksum:${SNAPSHOT_URI}"
     fi
 
-    # -xf 는 압축 형식을 자동 판별합니다 (gzip / 무압축 둘 다 처리).
-    tar -xf "$tmp/opensearch-snapshots.tar.gz" -C "$DEPLOY_DIR/deploy/snapshots"
-    ok "색인 스냅샷 배치 ($(du -sh "$DEPLOY_DIR/deploy/snapshots" | cut -f1))"
+    # --- 커밋 -------------------------------------------------
+    if need source-commit.txt "$STRICT"; then
+        pkg_commit="$(tr -d '[:space:]' < "$tmp/source-commit.txt")"
+        if [ "$pkg_commit" = "$DEPLOY_COMMIT" ]; then
+            ok "커밋 일치 (${DEPLOY_COMMIT:0:7})"
+        elif [ "$STRICT" = "1" ]; then
+            die "커밋 불일치 — 원본과 다른 버전의 배포 정의입니다
+  패키지(원본)  : $pkg_commit
+  옮겨 온 배포  : $DEPLOY_COMMIT
+  원본에서 패키지를 만든 뒤 배포 디렉터리가 바뀌었거나, 다른 시점의 디렉터리를 옮겼습니다."
+        else
+            warn "커밋 다름 — 패키지 ${pkg_commit:0:7} / 이번 배포 ${DEPLOY_COMMIT:0:7} (형태 간 이관이거나 새 버전으로 올리는 경우 정상)"
+        fi
+    else
+        pkg_commit=""
+    fi
 
-    # DB 는 기동 후에 볼륨 안으로 넣습니다(아래 9절). 여기서는 받아만 둡니다.
-    # 없으면 빈 DB 로 시작하는데, 그러면 기존 계정으로 로그인이 안 되어
-    # 이관 전후 동등성 확인의 첫 단계가 막힙니다.
-    if fetch "${SNAPSHOT_URI%/}/lexai.db" "$DEPLOY_DIR/deploy/lexai.db" 2>/dev/null; then
-        # ★ 체크섬 파일에는 DB 해시도 들어 있는데 위에서 아카이브 줄만 골라
-        #   검사하고 있었습니다. 같은 망 안에서 복사할 때는 드러나지 않지만,
-        #   오브젝트 스토리지나 HTTP 로 받으면 잘린 DB 가 그대로 들어가고
-        #   SQLite 는 한참 뒤에 알아보기 어려운 형태로 실패합니다.
-        #   (체크섬 파일은 $tmp, DB 는 배포 디렉터리에 있어 경로를 맞춥니다)
-        if [ -f "$tmp/checksums.sha256" ] && grep -qE '[[:space:]]lexai\.db$' "$tmp/checksums.sha256"; then
-            if ( cd "$DEPLOY_DIR/deploy" \
-                 && grep -E '[[:space:]]lexai\.db$' "$tmp/checksums.sha256" | sha256sum -c --quiet ); then
-                ok "DB 체크섬 확인"
-            else
-                die "DB 체크섬 불일치 — 전송이 온전하지 않습니다"
+    # --- 배포 파일 --------------------------------------------
+    # ★ 커밋이 같아도 옮겨 온 디렉터리의 파일을 누가 고쳤으면 커밋은 그걸 모릅니다.
+    if need deploy-files.sha256 "$STRICT"; then
+        if [ "$STRICT" = "1" ]; then
+            # ★ pipefail 이라 sha256sum 의 실패(=불일치)가 대입문의 실패가 되어 if 가
+            #   거꾸로 읽힙니다. 상태는 버리고 출력만 봅니다.
+            bad="$( { (cd "$DEPLOY_DIR" && sha256sum -c "$tmp/deploy-files.sha256" 2>&1) || true; } | { grep -v ': OK$' || true; } )"
+            if [ -n "$bad" ]; then
+                die "옮겨 온 배포 파일이 원본과 다릅니다:
+$(printf '%s\n' "$bad" | sed 's/^/    /')"
+            fi
+            ok "배포 파일 $(grep -c . "$tmp/deploy-files.sha256")개 원본과 일치"
+        fi
+    fi
+
+    # --- 이미지 digest ----------------------------------------
+    # 태그(v2 · latest)는 다시 푸시되면 다른 내용이 됩니다. 원본에서 실제로
+    # 돌던 digest 로 고정해야 "같은 것을 옮겼다" 가 성립합니다.
+    rm -f docker-compose.lock.yml
+    LOCK_SVCS="frontend tomcat ai ollama ollama-init opensearch"
+    if need images.lock "$STRICT"; then
+        materialize "$tmp/images.lock"
+        if [ "$STRICT" != "1" ] && [ "$pkg_commit" != "$DEPLOY_COMMIT" ]; then
+            warn "images.lock 은 커밋이 같을 때만 씁니다 — 이번 배포의 태그 기준으로 받습니다"
+        else
+            {
+                echo "# deploy.sh 가 이관 패키지의 images.lock 으로 만든 파일입니다."
+                echo "# 원본에서 실제로 돌던 이미지(digest)로 고정합니다. 지우면 태그 기준으로 돌아갑니다."
+                echo "services:"
+            } > docker-compose.lock.yml.new
+            n=0
+            for svc in $LOCK_SVCS; do
+                ref="$(awk -v s="$svc" '$1==s {print $2}' "$tmp/images.lock" | tail -1)"
+                if ! printf '%s' "$ref" | grep -qE '@sha256:[0-9a-f]{64}$'; then
+                    rm -f docker-compose.lock.yml.new
+                    [ "$STRICT" = "1" ] && die "images.lock 에 ${svc} 의 digest 가 없습니다 — 원본과 같은 이미지임을 보장할 수 없습니다"
+                    warn "images.lock 에 ${svc} 가 없어 이미지 고정을 쓰지 않습니다"; n=-1; break
+                fi
+                printf '  %s:\n    image: %s\n' "$svc" "$ref" >> docker-compose.lock.yml.new
+                n=$((n + 1))
+            done
+            if [ "$n" -gt 0 ]; then
+                mv docker-compose.lock.yml.new docker-compose.lock.yml
+                ok "이미지 digest 고정 ${n}개 (docker-compose.lock.yml)"
             fi
         fi
-        ok "DB 내려받음 ($(du -h "$DEPLOY_DIR/deploy/lexai.db" | cut -f1))"
+    fi
+
+    # --- 아카이브 · DB · 지문 · 런타임 -------------------------
+    need opensearch-snapshots.tar.gz 1
+    ok "아카이브 체크섬 확인"
+
+    if need lexai.db "$STRICT"; then
+        materialize "$tmp/lexai.db"; HAVE_DB=1; ok "DB 체크섬 확인 ($(du -h "$tmp/lexai.db" | cut -f1))"
     else
         warn "패키지에 lexai.db 가 없습니다 — 빈 DB 로 시작합니다"
     fi
-    rm -rf "$tmp"
+    if need data-fingerprint.tsv "$STRICT"; then
+        materialize "$tmp/data-fingerprint.tsv"; HAVE_FP=1; ok "데이터 지문 확인"
+    fi
+    # 데이터가 아니라 답변 조건이라, 없어도 멈추지 않습니다(비교 결과만 남김).
+    if need runtime-versions.txt 0; then
+        materialize "$tmp/runtime-versions.txt"; HAVE_RT=1
+        src_ollama="$(awk '$1=="ollama"{print $2}' "$tmp/runtime-versions.txt")"
+        ok "런타임 기록 확인 (원본 Ollama ${src_ollama:-?})"
+        # 네이티브 패키지처럼 images.lock 이 없으면 Ollama 만이라도 같은 버전으로 맞춥니다.
+        if [ ! -f docker-compose.lock.yml ] && [ -n "$src_ollama" ]; then
+            if $DOCKER pull -q "ollama/ollama:${src_ollama}" >/dev/null 2>&1; then
+                printf '# deploy.sh 가 원본의 Ollama 버전(runtime-versions.txt)으로 고정했습니다.\nservices:\n  ollama:\n    image: ollama/ollama:%s\n  ollama-init:\n    image: ollama/ollama:%s\n' \
+                    "$src_ollama" "$src_ollama" > docker-compose.lock.yml
+                ok "Ollama 를 원본과 같은 ${src_ollama} 로 고정"
+            else
+                warn "ollama/ollama:${src_ollama} 를 받지 못해 latest 로 진행합니다 — 답변 비교 때 변수가 됩니다"
+            fi
+        fi
+    fi
+
+    # --- 기존 설치 확인 ---------------------------------------
+    # ★ 이미 LexAI 가 돌던 VM 에 다시 이관하면(A→B→A) 옛 볼륨이 남아 옛 색인 ·
+    #   옛 DB 가 그대로 쓰입니다. 예전에는 "사용자가 있으면 복원 건너뜀" 이라
+    #   이관한 데이터가 조용히 무시되고, 서비스는 멀쩡해 보였습니다.
+    existing=()
+    for v in lexai_data opensearch_data; do
+        if vol_exists "$v"; then existing+=("볼륨 ${PROJECT}_$v"); fi
+    done
+    # 고정 container_name 이라 다른 프로젝트(다른 배포 디렉터리)의 컨테이너와도 부딪힙니다.
+    others="$( { $DOCKER ps -a --filter 'name=^lexai-' --format '{{.Names}} {{.Label "com.docker.compose.project"}}' \
+        | awk -v p="$PROJECT" '$2!=p {print $1" (프로젝트 "($2==""?"없음":$2)")"}'; } 2>/dev/null || true )"
+    if [ -n "$others" ]; then
+        die "이름이 겹치는 다른 LexAI 컨테이너가 있습니다 — 기동할 수 없습니다
+$(printf '%s\n' "$others" | sed 's/^/    /')
+  다른 배포 디렉터리의 스택이면 그 디렉터리에서 docker compose down 후 다시 실행하세요."
+    fi
+
+    if [ "${#existing[@]}" -gt 0 ]; then
+        if [ "$FORCE_CLEAN" = "1" ]; then
+            log "   FORCE_CLEAN=1 — 기존 설치를 비웁니다"
+            printf '    %s\n' "${existing[@]}"
+            # 1) DB 는 지우지 않고 보관합니다(작고, 되돌릴 길을 남깁니다).
+            if vol_exists lexai_data; then
+                replaced="$HOME/lexai-replaced/$(date +%Y%m%d-%H%M%S)"
+                mkdir -p "$replaced"
+                # 이미지가 아직 없으면 run 이 받습니다(태그 또는 lock 기준).
+                trun -v "$replaced:/out" "cp -a /var/lib/lexai/. /out/ 2>/dev/null || true; chown -R $(id -u):$(id -g) /out" >/dev/null \
+                    || warn "기존 DB 보관에 실패했습니다 — 계속 진행합니다"
+                ok "기존 DB 보관: $replaced"
+            fi
+            # 2) 컨테이너를 내리고 데이터 볼륨만 지웁니다.
+            #    ollama_models(5GB) · hf_cache 는 이관 대상이 아니라 남깁니다.
+            compose down --remove-orphans >/dev/null 2>&1 || true
+            for v in lexai_data opensearch_data; do
+                if vol_exists "$v"; then $DOCKER volume rm "${PROJECT}_$v" >/dev/null || die "볼륨 삭제 실패: ${PROJECT}_$v"; fi
+            done
+            rm -f "$APPLIED_MARK"
+            ok "데이터 볼륨 삭제 (모델 볼륨은 유지)"
+        elif [ -f "$APPLIED_MARK" ] && [ "$(cat "$APPLIED_MARK")" = "$PKG_ID" ]; then
+            PKG_SKIP=1
+            ok "이 패키지는 이미 적용됐습니다 — 데이터 단계를 건너뜁니다 (다시 적용하려면 FORCE_CLEAN=1)"
+        else
+            die "이 VM 에 기존 LexAI 데이터가 있습니다 — 그대로 진행하면 이관한 데이터 대신 옛 데이터가 쓰입니다
+$(printf '    %s\n' "${existing[@]}")
+  새 VM 으로 이관하거나, 기존 데이터를 비우고 진행하려면 FORCE_CLEAN=1 을 함께 주세요.
+  (기존 DB 는 ~/lexai-replaced/<시각> 으로 보관되고, 모델 볼륨은 남습니다.
+   이 VM 에서 이전 이관이 중간에 실패해 다시 돌리는 경우도 같습니다)"
+        fi
+    fi
+
+    if [ "$PKG_SKIP" = "0" ]; then
+        # --- 공간 ---------------------------------------------
+        # 스냅샷 폴더(풀린 아카이브)와 OpenSearch 볼륨(복원된 색인)이 각각
+        # 아카이브의 약 1.2배를 씁니다. 같은 디스크면 합쳐서 봅니다.
+        arc_kb=$(( $(stat -L -c %s "$tmp/opensearch-snapshots.tar.gz") / 1024 ))
+        need_kb=$(( arc_kb * 12 / 10 ))
+        droot="$($DOCKER info -f '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
+        free_snap=$(df -Pk "$DEPLOY_DIR" | awk 'NR==2 {print $4}')
+        free_dock=$( { sudo df -Pk "$droot" 2>/dev/null || df -Pk /var/lib; } | awk 'NR==2 {print $4}')
+        if [ "$( { sudo stat -c %d "$droot" 2>/dev/null || stat -c %d /var/lib; } )" = "$(stat -c %d "$DEPLOY_DIR")" ]; then
+            [ "$free_snap" -ge $(( need_kb * 2 )) ] \
+                || die "공간이 부족합니다 — 필요 약 $(( need_kb * 2 / 1024 / 1024 ))GB(스냅샷 + 복원 색인) / 여유 $(( free_snap / 1024 / 1024 ))GB (df -h 확인)"
+        else
+            [ "$free_snap" -ge "$need_kb" ] || die "스냅샷을 풀 공간이 부족합니다 — 필요 약 $(( need_kb / 1024 / 1024 ))GB / 여유 $(( free_snap / 1024 / 1024 ))GB"
+            [ "$free_dock" -ge "$need_kb" ] || die "Docker 디스크($droot) 공간이 부족합니다 — 필요 약 $(( need_kb / 1024 / 1024 ))GB / 여유 $(( free_dock / 1024 / 1024 ))GB"
+        fi
+
+        # --- 압축 해제 ----------------------------------------
+        # ★ 항상 비우고 풉니다. 옛 스냅샷 파일이 섞이면 저장소 세대 정보가
+        #   어긋나고, 아래 내용 대조도 깨집니다.
+        sudo rm -rf "$SNAP_DIR"
+        mkdir -p "$SNAP_DIR"
+        tar -xf "$tmp/opensearch-snapshots.tar.gz" -C "$SNAP_DIR" --no-same-owner
+
+        # 압축을 푼 결과가 원본 디렉터리와 같은지 — 개수 · 해시를 대조합니다.
+        if [ -f "$SNAP_DIR/contents.tsv" ]; then
+            want_n=$(grep -c . "$SNAP_DIR/contents.tsv")
+            have_n=$( cd "$SNAP_DIR" && find . -type f ! -name contents.tsv | wc -l )
+            [ "$want_n" = "$have_n" ] || die "스냅샷 파일 수가 다릅니다 — 목록 ${want_n}개 / 풀린 것 ${have_n}개"
+            ( cd "$SNAP_DIR" && awk -F'\t' '{print $3"  "$1}' contents.tsv | sha256sum -c --quiet ) >/dev/null 2>&1 \
+                || die "스냅샷 파일 내용이 목록(contents.tsv)과 다릅니다 — 아카이브가 온전하지 않습니다"
+            ok "색인 스냅샷 배치 — 파일 ${have_n}개 해시 일치 ($(du -sh "$SNAP_DIR" | cut -f1))"
+        else
+            [ "$STRICT" = "1" ] && die "아카이브 안에 contents.tsv 가 없습니다 — 압축 해제 결과를 대조할 수 없습니다"
+            warn "contents.tsv 가 없어 압축 해제 결과 대조를 건너뜁니다"
+        fi
+    fi
 fi
+own_snapdir
+sync_compose_file_env
 
 
 # -----------------------------------------------------------
-# 7. 기동
+# 7. 이미지
 # -----------------------------------------------------------
-cd "$DEPLOY_DIR"
-compose() { $DOCKER compose -f docker-compose.yml -f docker-compose.registry.yml "$@"; }
-
 if [ "$NO_START" = "1" ]; then
     echo
+    status_set state=prepared phase=compose:prepared finished_at="$(now_iso)"
     log "준비 완료 (NO_START=1 — 기동은 하지 않았습니다)"
-    echo "  기동: cd $DEPLOY_DIR && docker compose -f docker-compose.yml -f docker-compose.registry.yml up -d --no-build"
+    echo "  기동: cd $DEPLOY_DIR && docker compose up -d --no-build   (.env 의 COMPOSE_FILE 사용)"
     exit 0
 fi
 
 log "7. 이미지 받기"
-log "   ${REGISTRY_PREFIX}/lexai-{frontend,tomcat,ai}:${IMAGE_TAG}"
-compose pull
-ok "pull 완료"
-
-log "8. 기동"
-# --no-build 로 빌드 경로를 확실히 막습니다. registry 오버레이가 build: 를
-# 지우지만, 오버레이를 빠뜨린 실행을 여기서도 한 번 더 걸러냅니다.
-compose up -d --no-build
-
-# ai 는 임베딩 모델을 미리 로드하고, 그 전에 ollama-init 이 모델을 받습니다.
-# 최초 기동은 수 분 걸립니다(모델 5GB 다운로드 포함).
-log "   서비스 준비 대기 (최초 기동은 수 분 걸립니다)"
-deadline=$(( $(date +%s) + 900 ))
-while [ "$(date +%s)" -lt "$deadline" ]; do
-    if compose ps --format '{{.Service}} {{.Health}}' 2>/dev/null | grep -q '^ai healthy'; then
-        break
-    fi
-    sleep 10
-done
-if compose ps --format '{{.Service}} {{.Health}}' 2>/dev/null | grep -q '^ai healthy'; then
-    ok "ai 준비됨"
+phase compose:7-pull
+if [ -f docker-compose.lock.yml ] && grep -q '@sha256:' docker-compose.lock.yml; then
+    log "   원본과 같은 digest 로 받습니다 (docker-compose.lock.yml)"
+elif [ -f docker-compose.lock.yml ]; then
+    log "   Ollama 는 원본 버전으로, 나머지는 ${REGISTRY_PREFIX}/lexai-*:${IMAGE_TAG} 로 받습니다"
 else
-    warn "ai 가 15분 안에 준비되지 않았습니다 — docker compose logs ai 를 확인하세요"
+    log "   ${REGISTRY_PREFIX}/lexai-{frontend,tomcat,ai}:${IMAGE_TAG}"
 fi
+# ★ digest 로 고정한 경우에는 이미 있는 이미지를 다시 받지 않습니다(같은 digest 는
+#   같은 내용). Docker Hub 익명 받기 제한(429)에 걸릴 여지도 줄어듭니다.
+#   태그 기준이면 같은 태그가 다시 푸시됐을 수 있어 매번 확인합니다.
+pull_args=()
+if [ -f docker-compose.lock.yml ]; then pull_args=(--policy missing); fi
+pulled=0
+for try in 1 2 3; do
+    if compose pull "${pull_args[@]}"; then pulled=1; break; fi
+    if [ "$try" -lt 3 ]; then warn "이미지 받기 실패 — $((try * 30))초 뒤 다시 시도합니다 (${try}/3)"; sleep $((try * 30)); fi
+done
+[ "$pulled" = "1" ] || die "이미지를 받지 못했습니다 — 레지스트리 접근 · 태그(또는 lock 의 digest)를 확인하세요
+  429 Too Many Requests 면 Docker Hub 익명 받기 제한입니다: docker login 후 다시 실행하거나 잠시 뒤 재시도하세요."
+ok "pull 완료"
 
 
 # -----------------------------------------------------------
 # 8. SQLite DB
 #
-# 네이티브 형태는 DB 가 호스트 파일이라 그냥 갖다 놓으면 되지만, 컴포즈는
-# 네임드 볼륨 안에 있어 컨테이너가 떠야 접근할 수 있습니다. 그래서 기동
-# 뒤에 넣고 tomcat 만 다시 띄웁니다.
-#
-# entrypoint 는 DB 파일이 없을 때만 스키마를 만듭니다. 복원한 파일로
-# 덮어쓰고 재시작하면 그대로 씁니다.
+# ★ 기동 "전"에 볼륨에 넣습니다. 예전에는 띄운 뒤 docker cp 로 덮고 tomcat 만
+#   재시작했는데, 열려 있는 DB 를 바꿔치기하는 것이라 옛 -wal/-shm 이 새 파일에
+#   덧씌워질 수 있었고, 그 사이 들어온 쓰기가 섞일 수도 있었습니다.
+#   tomcat 이미지로 일회성 컨테이너를 띄워 볼륨에 직접 넣습니다.
 # -----------------------------------------------------------
-log "9. SQLite DB"
-db_users() {
-    # </dev/null 은 필수입니다 — docker compose exec 는 -T 여도 stdin 을 읽습니다.
-    { compose exec -T tomcat sqlite3 /var/lib/lexai/lexai.db \
-        "SELECT COUNT(*) FROM users;" </dev/null 2>/dev/null | tr -d '\r'; } || true
-}
-
-if [ ! -f "$DEPLOY_DIR/deploy/lexai.db" ]; then
-    ok "이관 DB 없음 — entrypoint 가 만든 빈 스키마로 시작합니다"
+log "8. SQLite DB"
+phase compose:8-db
+DB_IN="/var/lib/lexai/lexai.db"
+if [ "$HAVE_DB" = "1" ] && [ "$PKG_SKIP" = "0" ]; then
+    compose stop frontend tomcat >/dev/null 2>&1 || true
+    out="$(trun -v "$RESTORE_DIR:/in:ro" "set -e
+        mkdir -p /var/lib/lexai
+        rm -f $DB_IN $DB_IN-wal $DB_IN-shm $DB_IN-journal
+        cp /in/lexai.db $DB_IN
+        sqlite3 $DB_IN 'PRAGMA integrity_check;'
+        echo users=\$(sqlite3 $DB_IN 'SELECT COUNT(*) FROM users;')")" \
+        || die "DB 를 볼륨에 넣지 못했습니다"
+    printf '%s\n' "$out" | grep -qx 'ok' || die "DB 무결성 검사 실패:
+$out"
+    ok "DB 배치 — 무결성 ok · 사용자 $(printf '%s\n' "$out" | sed -n 's/^users=//p')명"
+elif [ "$PKG_SKIP" = "1" ]; then
+    ok "이미 적용한 패키지 — 건너뜀"
 else
-    users="$(db_users)"
-    if [ "${users:-0}" -gt 0 ] 2>/dev/null; then
-        ok "이미 사용자 ${users}명 — 복원 건너뜀"
+    ok "이관 DB 없음 — 볼륨에 DB 가 없으면 entrypoint 가 빈 스키마로 만듭니다"
+fi
+
+# 데이터 보존 확인 — 기동 전에 잽니다. verify.sh 가 verify 계정과 채팅을
+# 더하므로 그 뒤에 세면 원본과 항상 달라 보입니다.
+if [ "$HAVE_FP" = "1" ] && [ "$PKG_SKIP" = "0" ]; then
+    log "   데이터 보존 확인 (원본 패키지 ↔ 이 VM)"
+    mkdir -p "$RUN_DIR"
+    REPORT="$RUN_DIR/data-check.txt"
+    if trun -v "$RESTORE_DIR:/in:ro" -v "$DEPLOY_DIR/datacheck.sh:/opt/datacheck.sh:ro" \
+            "bash /opt/datacheck.sh check $DB_IN /in/data-fingerprint.tsv" | tee "$REPORT.tmp"; then
+        result=PASS
     else
-        compose cp "$DEPLOY_DIR/deploy/lexai.db" tomcat:/var/lib/lexai/lexai.db
-        compose restart tomcat >/dev/null
-        # 재시작 직후에는 아직 응답하지 않습니다.
-        # ★ [ ... ] && break 로 쓰면 안 됩니다. 테스트가 실패했을 때 AND 리스트가
-        #   비정상 종료 상태를 내고 set -e 가 스크립트를 죽입니다 — 대기가 정말
-        #   필요한 순간에만 터지는 종류의 버그입니다.
-        for _ in $(seq 1 12); do
-            users="$(db_users)"
-            if [ "${users:-0}" -gt 0 ] 2>/dev/null; then break; fi
-            sleep 5
-        done
-        if [ "${users:-0}" -gt 0 ] 2>/dev/null; then
-            ok "DB 복원 — 사용자 ${users}명"
-        else
-            warn "DB 를 넣었지만 사용자가 0명입니다 — docker compose logs tomcat 확인"
-        fi
+        result=FAIL
     fi
+    { echo "데이터 보존 확인 : $result"; echo "시각 : $(date '+%Y-%m-%d %H:%M:%S %Z')"; echo "형태 : compose (${PROJECT}_lexai_data:$DB_IN)"; echo; cat "$REPORT.tmp"; } > "$REPORT"
+    rm -f "$REPORT.tmp"
+    status_set data_check="$result" data_check_report="$REPORT"
+    [ "$result" = "PASS" ] || die "데이터 보존 FAIL — 원본과 다른 테이블이 있습니다 (기록: $REPORT)"
+    ok "데이터 보존 PASS — 모든 테이블의 행 수와 내용이 원본과 같습니다 (기록: $REPORT)"
+elif [ "$HAVE_DB" = "1" ] && [ "$PKG_SKIP" = "0" ]; then
+    warn "패키지에 data-fingerprint.tsv 가 없어 데이터 보존을 판정하지 못합니다"
 fi
 
 
 # -----------------------------------------------------------
-# 9. 색인 복원
+# 9. 색인
 #
-# 스냅샷을 넣어둔 경우에만 돕니다. 이미 색인이 있으면 건너뜁니다 —
-# 재실행으로 멀쩡한 색인을 덮어쓰는 일을 막습니다.
+# OpenSearch 만 먼저 띄워 복원합니다. ai 까지 같이 띄우면 ai 가 빈 색인을
+# 먼저 만들어 복원이 이름 충돌로 막히는 경쟁이 생깁니다.
 # -----------------------------------------------------------
-log "10. 색인"
-os() {  # os <curl 인자...>
-    $DOCKER compose -f docker-compose.yml -f docker-compose.registry.yml \
-        exec -T opensearch curl -sk -u "admin:${OS_PW}" "$@" </dev/null
-}
-OS_BASE="https://127.0.0.1:9200"
+log "9. 색인"
+phase compose:9-index
+compose up -d --no-build opensearch >/dev/null \
+    || die "OpenSearch 를 띄우지 못했습니다 — docker compose logs opensearch"
+wait_healthy opensearch 600 || die "OpenSearch 가 10분 안에 준비되지 않았습니다 — docker compose logs opensearch"
+# ★ 헬스체크(응답만 오면 통과)보다 보안 플러그인 초기화가 늦습니다. 그 사이의
+#   요청은 "OpenSearch Security not initialized"(503)로 거절되므로 200 을 기다립니다.
+os_up=0
+for _ in $(seq 1 60); do
+    if [ "$( { os -o /dev/null -w '%{http_code}' "$OS_BASE/_cluster/health"; } 2>/dev/null || true)" = "200" ]; then os_up=1; break; fi
+    sleep 3
+done
+[ "$os_up" = "1" ] || die "OpenSearch 가 요청을 받지 않습니다(보안 플러그인 초기화 · 인증) — docker compose logs opensearch"
+ok "OpenSearch 준비됨"
 
-count=$( { os "$OS_BASE/${INDEX_NAME}/_count" | grep -o '"count":[0-9]*' | cut -d: -f2; } || true )
-if [ -n "${count:-}" ] && [ "${count:-0}" -gt 0 ] 2>/dev/null; then
-    ok "색인이 이미 있습니다 (${count}건) — 복원 건너뜀"
-elif [ -z "$(ls -A "$DEPLOY_DIR/deploy/snapshots" 2>/dev/null)" ]; then
-    # 이관 없이 기동만 검증하는 경우입니다. 색인이 아예 없으면 검색이 404 로
-    # 떨어져 채팅이 에러가 나므로, 매핑만 갖춘 빈 색인을 만들어 둡니다 —
-    # 서비스는 정상 동작하고 근거 문서만 0건이 됩니다.
-    warn "스냅샷이 없습니다 — 빈 색인으로 진행합니다 (기동 검증 전용)"
-    if compose exec -T ai python -m indexing.index_builder </dev/null; then
-        ok "빈 색인 생성 (매핑만)"
-    else
-        warn "빈 색인 생성 실패 — 채팅이 에러가 날 수 있습니다 (docker compose logs ai)"
-    fi
-    warn "이관 검증까지 하려면 SNAPSHOT_URI 를 주고 다시 실행하세요"
-else
-    os -X PUT "$OS_BASE/_snapshot/${SNAPSHOT_REPO}" \
-        -H 'Content-Type: application/json' \
-        -d '{"type":"fs","settings":{"location":"/mnt/snapshots"}}' >/dev/null
+if [ "$HAVE_PKG" = "1" ] && [ "$PKG_SKIP" = "0" ]; then
+    resp="$(os -X PUT "$OS_BASE/_snapshot/${SNAPSHOT_REPO}" -H 'Content-Type: application/json' \
+        -d '{"type":"fs","settings":{"location":"/mnt/snapshots","compress":true}}')"
+    printf '%s' "$resp" | grep -q '"acknowledged":true' \
+        || die "스냅샷 저장소 등록 실패: $(printf '%s' "$resp" | head -c 500)"
     ok "스냅샷 저장소 등록"
 
-    # 패키지마다 스냅샷 이름이 달라(legal-<타임스탬프>) 고정할 수 없습니다.
-    # SUCCESS 인 것 중 가장 최근 것을 고릅니다.
+    # 패키지마다 스냅샷 이름이 달라(legal-<타임스탬프>) SUCCESS 중 가장 최근 것을 고릅니다.
     snap=$( { os "$OS_BASE/_cat/snapshots/${SNAPSHOT_REPO}?h=id,status,endEpoch" \
         | awk '$2=="SUCCESS"' | sort -k3 -n | tail -1 | awk '{print $1}'; } || true )
     [ -n "$snap" ] || die "복원할 스냅샷이 없습니다 — deploy/snapshots 내용을 확인하세요"
 
-    # ★ 빈 색인이 남아 있으면 복원이 막힙니다 — OpenSearch 는 같은 이름의
-    #   열린 색인이 있으면 거부합니다. 앞선 기동에서 만들어둔 껍데기가
-    #   그 상태입니다(문서가 있는 색인은 위에서 이미 건너뜁니다).
-    if os -o /dev/null -w '%{http_code}' "$OS_BASE/${INDEX_NAME}" | grep -q 200; then
-        os -X DELETE "$OS_BASE/${INDEX_NAME}" >/dev/null
-        ok "빈 색인 삭제 — 복원 자리를 비웁니다"
-    fi
-
-    # ★ 복원은 스냅샷 크기만큼 디스크를 더 씁니다. 부족하면 도중에 멈추고
-    #   red 상태의 빈 색인만 남는데, 그게 다음 재시도까지 막습니다
-    #   (already exists). 실제로 겪었으니 미리 확인합니다.
-    need_kb=$(du -sk "$DEPLOY_DIR/deploy/snapshots" | cut -f1)
-    free_kb=$(df -Pk /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}')
-    if [ -n "$free_kb" ] && [ "$free_kb" -lt "$need_kb" ]; then
-        warn "여유 공간이 부족할 수 있습니다"
-        warn "  필요(최대) : $(numfmt --to=iec $((need_kb * 1024)) 2>/dev/null || echo "${need_kb}K")"
-        warn "  여유       : $(numfmt --to=iec $((free_kb * 1024)) 2>/dev/null || echo "${free_kb}K")"
-        die "공간을 확보한 뒤 다시 실행하세요 (docker image prune -af · 옛 패키지 삭제 등)"
+    # ★ 문서가 0건인 껍데기 색인만 지웁니다. 예전에는 "HTTP 200 이면 삭제" 라,
+    #   경쟁 상황에서 내용이 있는 색인까지 지울 수 있었습니다.
+    if [ "$(os_code)" = "200" ]; then
+        c="$(os_count)"
+        if [ "${c:-0}" = "0" ]; then
+            os -X DELETE "$OS_BASE/${INDEX_NAME}" >/dev/null
+            ok "빈 색인 삭제 — 복원 자리를 비웁니다"
+        else
+            die "이미 ${c}건이 든 색인이 있습니다 — 덮어쓰지 않습니다 (FORCE_CLEAN=1 로 다시 실행)"
+        fi
     fi
 
     log "   복원 중: $snap (수 분 걸립니다)"
     started=$(date +%s)
-    # ★ 응답을 버리면 안 됩니다. 실패해도 "색인이 비어 있습니다" 라는
-    #   결과만 보이고 진짜 이유(공간 부족·권한·이름 충돌)가 사라집니다.
     resp=$(os -X POST "$OS_BASE/_snapshot/${SNAPSHOT_REPO}/${snap}/_restore?wait_for_completion=true" \
-        -H 'Content-Type: application/json' \
-        -d "{\"indices\":\"${INDEX_NAME}\"}")
-    elapsed=$(( $(date +%s) - started ))
-
-    if printf '%s' "$resp" | grep -q '"error"'; then
-        warn "복원 API 오류:"
-        printf '%s\n' "$resp" | head -c 700 >&2; echo >&2
+        -H 'Content-Type: application/json' -d "{\"indices\":\"${INDEX_NAME}\"}")
+    shards="$(printf '%s' "$resp" | python3 -c 'import json,sys
+d=json.load(sys.stdin)["snapshot"]["shards"]; print(d["total"], d["failed"], d["successful"])' 2>/dev/null || true)"
+    if [ -z "$shards" ] || [ "$(echo "$shards" | awk '{print $2}')" != "0" ] || [ "$(echo "$shards" | awk '{print $1}')" = "0" ]; then
+        die "색인 복원 실패 (샤드 total/failed/successful: ${shards:-?}):
+$(printf '%s' "$resp" | head -c 700)"
     fi
+    os "$OS_BASE/_cluster/health/${INDEX_NAME}?wait_for_status=yellow&timeout=120s" >/dev/null || true
+    count="$(os_count)"
+    [ "${count:-0}" -gt 0 ] 2>/dev/null || die "복원 후에도 색인이 비어 있습니다 (df -h · docker compose logs opensearch)"
+    ok "복원 완료 — ${count}건 ($(( $(date +%s) - started ))초)"
+    status_set index_docs="$count"
+elif [ "$PKG_SKIP" = "1" ]; then
+    ok "이미 적용한 패키지 — 색인 $(os_count)건"
+fi
 
-    count=$( { os "$OS_BASE/${INDEX_NAME}/_count" | grep -o '"count":[0-9]*' | cut -d: -f2; } || true )
-    [ "${count:-0}" -gt 0 ] || die "복원 후에도 색인이 비어 있습니다 (위 응답과 df -h 를 확인하세요)"
-    ok "복원 완료 — ${count}건 (${elapsed}초)"
+# 데이터 단계 완료 표시 — 이후 단계에서 실패해 다시 돌려도 데이터는 건드리지 않습니다.
+if [ "$HAVE_PKG" = "1" ] && [ "$PKG_SKIP" = "0" ]; then
+    printf '%s\n' "$PKG_ID" > "$APPLIED_MARK"
+    rm -f "$RESTORE_DIR/lexai.db"
 fi
 
 
 # -----------------------------------------------------------
-# 9. 헬스체크
+# 10. 기동
+# -----------------------------------------------------------
+log "10. 기동"
+phase compose:10-start
+# ollama-init 이 모델(약 5GB)을 받는 동안 up 이 기다립니다(ai 의 depends_on).
+log "   서비스 기동 (최초에는 모델 다운로드로 수 분 걸립니다)"
+compose up -d --no-build \
+    || die "기동 실패 — docker compose logs ollama-init · docker compose ps -a 를 확인하세요"
+
+wait_healthy ai 1200 || die "ai 가 20분 안에 준비되지 않았습니다 — docker compose logs ai"
+ok "ai 준비됨"
+wait_healthy tomcat 300 || die "tomcat 이 5분 안에 준비되지 않았습니다 — docker compose logs tomcat"
+ok "tomcat 준비됨"
+code=000
+for _ in $(seq 1 24); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${FRONTEND_PORT}/" || true)
+    if [ "$code" = "200" ]; then break; fi
+    sleep 5
+done
+[ "$code" = "200" ] || die "프론트엔드가 응답하지 않습니다 (HTTP $code, 포트 ${FRONTEND_PORT}) — docker compose logs frontend"
+ok "프론트엔드 HTTP 200 (포트 ${FRONTEND_PORT})"
+
+# 이관 없이 기동만 하는 경우 — 색인이 아예 없으면 검색이 404 로 떨어져 채팅이
+# 에러가 나므로, 매핑만 갖춘 빈 색인을 만들어 둡니다(근거 문서만 0건).
+if [ "$HAVE_PKG" = "0" ] && [ "$(os_code)" = "404" ]; then
+    warn "색인이 없습니다 — 빈 색인으로 진행합니다 (기동 검증 전용)"
+    # ★ index_builder 는 생성에 실패해도 0 으로 끝납니다(디스크 워터마크 차단 등).
+    #   종료 코드가 아니라 색인이 실제로 생겼는지로 판정합니다.
+    compose exec -T ai python -m indexing.index_builder </dev/null || true
+    if [ "$(os_code)" = "200" ]; then
+        ok "빈 색인 생성 (매핑만)"
+    else
+        warn "빈 색인 생성 실패 — 채팅이 에러가 날 수 있습니다 (docker compose logs ai)"
+    fi
+fi
+
+# 런타임 비교 (경고만) — 원본과 같은 Ollama 버전 · 모델로 떴는지.
+# 데이터가 아니라 "같은 조건에서 답하는가" 의 문제라 실패로 보지 않습니다.
+if [ "$HAVE_RT" = "1" ] && [ -f "$RESTORE_DIR/runtime-versions.txt" ]; then
+    log "   런타임 비교 (원본 ↔ 이 VM)"
+    RT="$RESTORE_DIR/runtime-versions.txt"
+    rt_ok=yes
+    want_v="$(awk '$1=="ollama"{print $2}' "$RT")"
+    have_v="$( { compose exec -T ollama ollama --version </dev/null 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | tail -1; } || true )"
+    if [ "$want_v" = "$have_v" ]; then ok "Ollama ${have_v} (원본과 같음)"
+    else warn "Ollama 버전 다름 — 원본 ${want_v:-?} / 이 VM ${have_v:-?}"; rt_ok=no; fi
+    have_models="$( { compose exec -T ollama ollama list </dev/null 2>/dev/null | awk 'NR>1 {print $1" "$2}'; } || true )"
+    while read -r _ name id; do
+        [ -n "$name" ] || continue
+        got="$(printf '%s\n' "$have_models" | awk -v n="$name" '$1==n {print $2}')"
+        if [ "$got" = "$id" ]; then ok "모델 $name ($id)"
+        else warn "모델 $name 다름 — 원본 $id / 이 VM ${got:-없음}"; rt_ok=no; fi
+    done < <(awk '$1=="model"' "$RT")
+    status_set runtime_match="$rt_ok"
+    mv "$RT" "$RESTORE_DIR/runtime-versions.checked-$(date +%Y%m%d-%H%M%S).txt"
+fi
+
+# 모델 예열
+# ★ 첫 질문 때 Ollama 가 모델(약 4.5GB)을 디스크에서 GPU 로 처음 올립니다.
+#   새 EBS 의 첫 읽기는 느려 이것만 3~5분 걸리고, 백엔드 타임아웃(180초)을
+#   넘겨 첫 질문이 실패합니다(네이티브 1차 실행의 검증 FAIL 원인).
+#   옵션을 실제 호출과 같게 num_ctx 4096 으로 맞춥니다 — 다르면 다시 올립니다.
+#   실패해도 기동은 성공으로 둡니다 — 첫 질문이 느릴 뿐 서비스는 정상입니다.
+if [ "${SKIP_WARMUP:-0}" != "1" ]; then
+    log "   모델 예열"
+    WARM_PY='import json,os,sys,urllib.request
+m, t = sys.argv[1], int(sys.argv[2])
+base = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
+body = json.dumps({"model": m, "prompt": "", "keep_alive": "24h", "options": {"num_ctx": 4096}}).encode()
+req = urllib.request.Request(base + "/api/generate", data=body, headers={"Content-Type": "application/json"})
+urllib.request.urlopen(req, timeout=t).read()'
+    WARM_MAIN="${OLLAMA_MODEL:-$(_env_from_file OLLAMA_MODEL)}"
+    WARM_REWRITE="${OLLAMA_REWRITE_MODEL:-$(_env_from_file OLLAMA_REWRITE_MODEL)}"
+    for m in "${WARM_MAIN:-legal-gemma}" "${WARM_REWRITE:-gemma3:1b}"; do
+        t0=$(date +%s)
+        if compose exec -T ai python -c "$WARM_PY" "$m" "${WARMUP_TIMEOUT:-900}" </dev/null >/dev/null 2>&1; then
+            ok "$m GPU 적재 ($(( $(date +%s) - t0 ))초)"
+        else
+            warn "$m 예열 실패 — 첫 질문이 느릴 수 있습니다"
+        fi
+    done
+fi
+
+
+# -----------------------------------------------------------
+# 11. 검증
+#
+# ★ verify.sh 는 verify 계정을 가입시키고 실제로 채팅을 보내 DB 에 기록을
+#   남깁니다. 이관 모드에서는 원본에 없던 기록이 생기므로 기본으로 건너뜁니다
+#   (RUN_VERIFY=1 로 켬). 데이터 보존은 위 지문 비교가 판정합니다.
+#   이관 모드에서 켠 경우에도 응답 속도 FAIL 은 이관 실패로 보지 않습니다
+#   (VERIFY_GATE=0 — 네이티브 up.sh 와 같음).
 # -----------------------------------------------------------
 log "11. 검증"
-# 네이티브의 up.sh 와 같은 자리입니다 — 기동 다음에 합격 기준을 자동
-# 판정하고 결과를 CSV 로 누적합니다. 두 형태를 같은 기준으로 비교하려면
-# 이 단계가 양쪽에 다 있어야 합니다.
+phase compose:11-verify
+VERIFY_GATE="${VERIFY_GATE:-$([ "$STRICT" = "1" ] && echo 0 || echo 1)}"
 VERIFY_RESULT="건너뜀"
-if [ -f "$DEPLOY_DIR/verify.sh" ]; then
+if [ "$SKIP_VERIFY" = "1" ] || { [ "$STRICT" = "1" ] && [ "$RUN_VERIFY" != "1" ]; }; then
+    ok "검증 건너뜀 — 수동 실행: bash $DEPLOY_DIR/verify.sh (verify 계정 · 채팅이 DB 에 남습니다)"
+else
     if FORM="${FORM:-docker-compose}" RUNS="${RUNS:-1}" \
-       ALLOW_EMPTY_INDEX="${ALLOW_EMPTY_INDEX:-$([ -z "${SNAPSHOT_URI:-}" ] && echo 1 || echo 0)}" \
+       ALLOW_EMPTY_INDEX="${ALLOW_EMPTY_INDEX:-$([ "$HAVE_PKG" = "0" ] && echo 1 || echo 0)}" \
        bash "$DEPLOY_DIR/verify.sh"; then
         VERIFY_RESULT="PASS"
     else
         VERIFY_RESULT="FAIL"
     fi
-else
-    code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1/" || echo 000)
-    if [ "$code" = "200" ]; then ok "프론트엔드 HTTP $code"; else warn "프론트엔드 HTTP $code (기대 200)"; fi
 fi
+case "$VERIFY_RESULT" in
+    PASS) status_set verify=PASS ;;
+    FAIL) status_set verify=FAIL ;;
+    *)    status_set verify=SKIPPED ;;
+esac
 
 echo
 compose ps --format 'table {{.Service}}\t{{.Status}}'
 echo
-log "검증 결과: $VERIFY_RESULT"
+log "결과"
+echo "  배포 커밋     : ${DEPLOY_COMMIT:0:7} ($([ "$STRICT" = "1" ] && echo '이관 모드' || echo '일반 배포'))"
+echo "  이미지 고정   : $(if grep -qs '@sha256:' docker-compose.lock.yml; then echo 'docker-compose.lock.yml (원본 digest)'; elif [ -f docker-compose.lock.yml ]; then echo "태그 ${IMAGE_TAG} + Ollama 원본 버전"; else echo "태그 ${IMAGE_TAG}"; fi)"
+echo "  데이터 보존   : $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("data_check","NA"))' "$STATUS_FILE" 2>/dev/null || echo NA)"
+echo "  검증          : $VERIFY_RESULT"
+
+_finish() {
+    local s0; s0="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("start_epoch",""))' "$STATUS_FILE" 2>/dev/null || true)"
+    status_set state=success phase=done exit_code=0 finished_at="$(now_iso)" \
+               total_seconds="$([ -n "$s0" ] && echo $(( $(date +%s) - s0 )) || echo '')"
+}
+if [ "$VERIFY_RESULT" = "FAIL" ] && [ "$VERIFY_GATE" = "1" ]; then
+    die "검증 FAIL — 위 항목과 docker compose logs 를 확인하세요"
+fi
+if [ "$VERIFY_RESULT" = "FAIL" ]; then
+    warn "검증 FAIL 이지만 이관 모드라 이관 실패로 기록하지 않습니다 (status.json verify=FAIL)"
+fi
+_finish
 
 echo
 log "배포 완료: $DEPLOY_DIR"
-echo "  로그   : cd $DEPLOY_DIR && docker compose logs -f"
+echo "  상태   : cat ~/lexai-run/status.json"
+echo "  로그   : cd $DEPLOY_DIR && docker compose logs -f      (.env 의 COMPOSE_FILE 로 정의를 맞춰 둡니다)"
 echo "  종료   : cd $DEPLOY_DIR && docker compose down"
-echo "  재기동 : bash $DEPLOY_DIR/deploy.sh"
+echo "  재기동 : cd $DEPLOY_DIR && docker compose up -d --no-build"
+echo "  패키지 : STOP_WRITES=1 bash $DEPLOY_DIR/backup.sh       → ~/lexai-backup/latest"
 echo
-echo "  ※ 보안 그룹에서 80 을 열지 않았다면 SSH 터널로 접속하세요:"
-echo "      ssh -L 8080:localhost:80 ubuntu@<이 VM 의 IP>   → http://localhost:8080"
+echo "  ※ 보안 그룹에서 ${FRONTEND_PORT} 을 열지 않았다면 SSH 터널로 접속하세요:"
+echo "      ssh -L 8080:localhost:${FRONTEND_PORT} <사용자>@<이 VM 의 IP>   → http://localhost:8080"

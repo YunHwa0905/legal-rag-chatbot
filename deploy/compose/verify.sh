@@ -35,6 +35,7 @@ INDEX_NAME="${INDEX_NAME:-legal_documents}"
 RESULTS="${RESULTS:-$HOME/lexai-run/results.csv}"
 USER_NAME="${VERIFY_USER:-verify}"
 USER_PW="${VERIFY_PW:-Verify1234!}"
+FRONTEND_PORT="${FRONTEND_PORT:-$( { grep -E '^FRONTEND_PORT=' .env 2>/dev/null | tail -1 | cut -d= -f2-; } || true )}"
 FRONT="http://127.0.0.1:${FRONTEND_PORT:-80}"
 
 mkdir -p "$(dirname "$RESULTS")"
@@ -70,7 +71,19 @@ pct() {
 
 # docker 를 sudo 없이 쓸 수 있는지 한 번만 판정합니다.
 if docker info >/dev/null 2>&1; then DOCKER="docker"; else DOCKER="sudo docker"; fi
-compose() { $DOCKER compose -f docker-compose.yml -f docker-compose.registry.yml "$@"; }
+# deploy.sh 와 같은 파일 목록(이관 시 이미지 고정 lock · override 포함)
+compose_files() {
+    local f="docker-compose.yml:docker-compose.registry.yml"
+    [ -f docker-compose.lock.yml ] && f="$f:docker-compose.lock.yml"
+    [ -f docker-compose.override.yml ] && f="$f:docker-compose.override.yml"
+    printf '%s' "$f"
+}
+compose() {
+    local a=() f fs
+    IFS=: read -ra fs <<< "$(compose_files)"
+    for f in "${fs[@]}"; do a+=(-f "$f"); done
+    $DOCKER compose "${a[@]}" "$@"
+}
 
 # ★ </dev/null 은 필수입니다 — docker compose exec 는 -T 여도 stdin 을 읽습니다.
 dex() { compose exec -T "$@" </dev/null 2>/dev/null; }

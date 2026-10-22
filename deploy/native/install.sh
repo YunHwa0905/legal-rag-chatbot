@@ -66,12 +66,25 @@ log "3. Ollama"
 # 이관 모드에서는 bootstrap 이 원본의 버전(패키지 runtime-versions.txt)을
 # 넘겨 줍니다 — 버전이 다르면 같은 질문에도 답변이 달라질 수 있습니다.
 if ! command -v ollama >/dev/null 2>&1; then
+    # ★ 이전 설치를 지우다 만 VM 에는 ollama 그룹만 남아 있을 수 있습니다. 그러면
+    #   공식 설치 스크립트의 useradd -U 가 "group ollama exists" 로 실패하고,
+    #   서비스 계정 없이 끝나 뒤에서 systemctl 이 원인 없이 실패합니다.
+    #   그룹이 있고 계정이 없으면 그 그룹으로 계정을 먼저 만들어 둡니다
+    #   (설치 스크립트는 계정이 있으면 만들지 않습니다).
+    if getent group ollama >/dev/null 2>&1 && ! id ollama >/dev/null 2>&1; then
+        warn "ollama 그룹만 남아 있어 계정을 그 그룹으로 만듭니다 (이전 설치 잔여물)"
+        sudo useradd -r -s /bin/false -g ollama -m -d /usr/share/ollama ollama \
+            || die "ollama 계정을 만들지 못했습니다 — sudo groupdel ollama 후 다시 실행하세요"
+    fi
     if [ -n "${OLLAMA_VERSION:-}" ]; then
         log "   Ollama ${OLLAMA_VERSION} 설치 (지정 버전)"
-        curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION="$OLLAMA_VERSION" sh
+        curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION="$OLLAMA_VERSION" sh \
+            || die "Ollama ${OLLAMA_VERSION} 설치 실패 — 위 출력을 확인하세요 (버전이 없으면 OLLAMA_VERSION 을 비우고 다시 실행)"
     else
-        curl -fsSL https://ollama.com/install.sh | sh
+        curl -fsSL https://ollama.com/install.sh | sh \
+            || die "Ollama 설치 실패 — 위 출력을 확인하세요"
     fi
+    command -v ollama >/dev/null 2>&1 || die "Ollama 설치 후에도 ollama 명령이 없습니다"
 else
     ok "이미 설치됨 — 건너뜀"
 fi
@@ -88,8 +101,19 @@ sudo mkdir -p /etc/systemd/system/ollama.service.d
 printf '[Service]\nEnvironment="OLLAMA_KEEP_ALIVE=24h"\n' \
     | sudo tee /etc/systemd/system/ollama.service.d/override.conf >/dev/null
 sudo systemctl daemon-reload
+# 설치 스크립트가 서비스 계정 · 유닛을 만들지 못했으면 아래 restart 가 원인 없이
+# 실패합니다. 먼저 확인해서 무엇이 빠졌는지 남깁니다.
+id ollama >/dev/null 2>&1 \
+    || die "ollama 서비스 계정이 없습니다 — 설치 스크립트가 계정 생성에 실패했습니다
+  흔한 원인: 이전 설치의 ollama 그룹만 남은 경우 → sudo groupdel ollama 후 다시 실행"
+systemctl cat ollama >/dev/null 2>&1 \
+    || die "ollama.service 유닛이 없습니다 — 설치 스크립트 출력을 확인하세요 (systemd 가 없는 이미지일 수 있습니다)"
 sudo systemctl enable --now ollama >/dev/null 2>&1 || true
-sudo systemctl restart ollama
+if ! sudo systemctl restart ollama; then
+    warn "ollama.service 재시작 실패 — 최근 로그:"
+    sudo journalctl -u ollama -n 30 --no-pager 2>/dev/null | sed 's/^/    /' >&2 || true
+    die "ollama.service 를 띄우지 못했습니다 (위 로그 · systemctl status ollama 확인)"
+fi
 ok "KEEP_ALIVE: $(systemctl show ollama -p Environment --no-pager | tr ' ' '\n' | grep -i keep_alive || echo '미적용')"
 
 if nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1; then
