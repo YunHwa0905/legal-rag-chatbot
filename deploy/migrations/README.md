@@ -27,6 +27,10 @@ deploy/migrations/0002_create_feedback.sql
 5. SQLite 의 `ALTER TABLE` 은 제한적입니다(`ADD COLUMN`, `RENAME` 정도).
    컬럼 삭제·타입 변경은 "새 테이블 생성 → 데이터 복사 → 교체" 로 작성합니다.
 6. `ADD COLUMN ... NOT NULL` 에는 `DEFAULT` 가 있어야 합니다(기존 행 때문).
+7. 기존 행의 값을 바꾸는 마이그레이션(`UPDATE` · `DELETE`)은 신중히 씁니다.
+   이관 뒤 `check-data.sh` 는 원본 패키지의 행 수 · 내용과 비교하므로, 버전이 다른 DB 를
+   올리면서 이런 마이그레이션이 돌면 "불일치" 로 멈춥니다. 같은 커밋끼리의 이관에서는
+   원본에서 이미 적용된 번호라 다시 돌지 않으니 문제없습니다.
 
 ## 범위
 

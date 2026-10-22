@@ -31,8 +31,8 @@ RUNS="${RUNS:-1}"
 ALLOW_EMPTY_INDEX="${ALLOW_EMPTY_INDEX:-0}"
 
 PASS=0; FAIL=0
-pass() { PASS=$((PASS+1)); printf '\033[0;32m  PASS\033[0m %s\n' "$*"; }
-fail() { FAIL=$((FAIL+1)); printf '\033[0;31m  FAIL\033[0m %s\n' "$*"; }
+pass() { PASS=$((PASS+1)); printf '%s  PASS%s %s\n' "$C_OK" "$C_OFF" "$*"; }
+fail() { FAIL=$((FAIL+1)); printf '%s  FAIL%s %s\n' "$C_ERR" "$C_OFF" "$*"; }
 
 now_ms() { date +%s%3N; }
 secs()   { awk -v ms="$1" 'BEGIN{printf "%.1f", ms/1000}'; }

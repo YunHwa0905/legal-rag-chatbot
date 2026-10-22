@@ -62,11 +62,24 @@ ok "vm.max_map_count = $(sysctl -n vm.max_map_count)"
 
 log "3. Ollama"
 # -----------------------------------------------------------
+# OLLAMA_VERSION 을 주면 그 버전을 설치합니다(공식 설치 스크립트가 지원).
+# 이관 모드에서는 bootstrap 이 원본의 버전(패키지 runtime-versions.txt)을
+# 넘겨 줍니다 — 버전이 다르면 같은 질문에도 답변이 달라질 수 있습니다.
 if ! command -v ollama >/dev/null 2>&1; then
-    curl -fsSL https://ollama.com/install.sh | sh
+    if [ -n "${OLLAMA_VERSION:-}" ]; then
+        log "   Ollama ${OLLAMA_VERSION} 설치 (지정 버전)"
+        curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION="$OLLAMA_VERSION" sh
+    else
+        curl -fsSL https://ollama.com/install.sh | sh
+    fi
 else
     ok "이미 설치됨 — 건너뜀"
 fi
+if [ -n "${OLLAMA_VERSION:-}" ] && [ "$(ollama_version)" != "$OLLAMA_VERSION" ]; then
+    warn "설치된 Ollama $(ollama_version) ≠ 지정 ${OLLAMA_VERSION} — 이미 깔린 VM 이라 바꾸지 않았습니다"
+    warn "  맞추려면: curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION=${OLLAMA_VERSION} sh"
+fi
+ok "Ollama $(ollama_version)"
 
 # 유휴 시 모델을 내리지 않게 합니다. 네이티브 기본값은 5분이라
 # 그대로 두면 잠깐만 쉬어도 다음 질문이 콜드 스타트가 됩니다

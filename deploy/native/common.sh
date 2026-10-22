@@ -95,10 +95,68 @@ export TZ="${TZ:-Asia/Seoul}"
 # -----------------------------------------------------------
 # 출력 헬퍼
 # -----------------------------------------------------------
-log()  { printf '\033[0;36m[%s]\033[0m %s\n' "$(date +%H:%M:%S)" "$*"; }
-ok()   { printf '\033[0;32m  OK\033[0m   %s\n' "$*"; }
-warn() { printf '\033[0;33m  WARN\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[0;31m  FATAL\033[0m %s\n' "$*" >&2; exit 1; }
+# ★ 색상은 터미널일 때만 씁니다. 리모트 커맨드 · 오케스트레이터 · 로그 파일로
+#   받으면 터미널이 아니므로, 그대로 두면 \033[0;32m 같은 제어문자가 로그에
+#   섞여 읽기도 파싱하기도 어렵습니다. NO_COLOR=1 로 강제로 끌 수도 있습니다.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    C_INFO=$'\033[0;36m'; C_OK=$'\033[0;32m'; C_WARN=$'\033[0;33m'
+    C_ERR=$'\033[0;31m'; C_HEAD=$'\033[1;35m'; C_OFF=$'\033[0m'
+else
+    C_INFO=""; C_OK=""; C_WARN=""; C_ERR=""; C_HEAD=""; C_OFF=""
+fi
+log()  { printf '%s[%s]%s %s\n' "$C_INFO" "$(date +%H:%M:%S)" "$C_OFF" "$*"; }
+ok()   { printf '%s  OK%s   %s\n' "$C_OK" "$C_OFF" "$*"; }
+warn() { printf '%s  WARN%s %s\n' "$C_WARN" "$C_OFF" "$*" >&2; }
+die()  {
+    printf '%s  FATAL%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2
+    status_set "last_error=$*"
+    exit 1
+}
+
+# -----------------------------------------------------------
+# 상태 파일 (오케스트레이터용)
+#
+# 배포 · 이관은 25~30분 걸려 백그라운드로 띄울 수밖에 없고, 그러면 호출한
+# 쪽은 종료 코드를 받지 못합니다. 대신 이 JSON 을 폴링하면 됩니다.
+#   ~/lexai-run/status.json         bootstrap · up.sh (배포 · 이관)
+#   ~/lexai-run/backup-status.json  backup.sh
+# 필드와 값은 deploy/native/README.md 의 "상태 파일" 절에 정리돼 있습니다.
+# 쓰기 실패가 배포를 멈추게 하지 않도록 오류는 무시합니다.
+# -----------------------------------------------------------
+STATUS_FILE="${STATUS_FILE:-${RUN_DIR}/status.json}"
+
+status_set() {  # status_set 키=값 ...
+    [ -n "${STATUS_FILE:-}" ] || return 0
+    mkdir -p "$(dirname "$STATUS_FILE")" 2>/dev/null || return 0
+    python3 - "$STATUS_FILE" "$@" <<'PY' 2>/dev/null || true
+import json, os, sys, time
+path = sys.argv[1]
+try:
+    data = json.load(open(path))
+except Exception:
+    data = {}
+for kv in sys.argv[2:]:
+    k, _, v = kv.partition("=")
+    data[k] = v
+data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(data, f, ensure_ascii=False, indent=1)
+os.replace(tmp, path)
+PY
+}
+
+status_get() {  # status_get 키 — 없으면 빈 문자열
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],""))' \
+        "$STATUS_FILE" "$1" 2>/dev/null || true
+}
+
+now_iso() { date '+%Y-%m-%dT%H:%M:%S%z'; }
+
+# Ollama 버전 (예: 0.12.3). 서버가 꺼져 있으면 경고 줄이 섞이므로 숫자만 뽑습니다.
+ollama_version() {
+    { ollama --version 2>/dev/null || true; } | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
+}
 
 # -----------------------------------------------------------
 # .env 에서 값 하나 읽기
@@ -207,7 +265,16 @@ write_manifest() {
 # 하나라도 어긋나면 1 을 돌려주고 어긋난 항목을 출력합니다.
 verify_manifest() {
     local dir="$1" manifest="$1/$MANIFEST_NAME"
-    [ -f "$manifest" ] || { warn "목록 파일이 없어 정합성 대조를 건너뜁니다: $manifest"; return 0; }
+    if [ ! -f "$manifest" ]; then
+        # 이관 모드(bootstrap NO_UPDATE=1 → REQUIRE_MANIFEST=1)에서는 대조 없이
+        # 넘어가면 "데이터가 온전하다"는 근거가 하나 빠지므로 실패로 봅니다.
+        if [ "${REQUIRE_MANIFEST:-0}" = "1" ]; then
+            warn "목록 파일이 없습니다: $manifest — 이관 모드에서는 대조 없이 진행하지 않습니다"
+            return 1
+        fi
+        warn "목록 파일이 없어 정합성 대조를 건너뜁니다: $manifest"
+        return 0
+    fi
 
     local want_count want_bytes have_count have_bytes bad=0
     want_count=$(wc -l < "$manifest")

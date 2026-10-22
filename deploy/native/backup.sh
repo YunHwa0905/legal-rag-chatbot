@@ -20,7 +20,9 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-STAMP="$(date +%Y%m%d-%H%M)"
+# 초까지 넣습니다. 분 단위였을 때 같은 분에 두 번 뜨면 스냅샷 이름이 겹쳐
+# 생성이 거부됐는데, 그 오류를 버리고 이전 스냅샷으로 패키지를 만들었습니다.
+STAMP="$(date +%Y%m%d-%H%M%S)"
 # 고정 경로입니다. Beetle 데이터 마이그레이션처럼 전송 경로(path)와
 # 후처리 명령(postCmd)을 미리 적어 두는 도구가 매번 같은 위치를 가리킬 수
 # 있어야 합니다. 회차별로 남기고 싶으면 OUT_DIR 로 따로 지정하세요.
@@ -31,12 +33,19 @@ INDEX_NAME="${INDEX_NAME:-legal_documents}"
 
 mkdir -p "$OUT_DIR"
 
+# 상태 파일 (오케스트레이터용) — 하위 스크립트(stop.sh 등)의 오류도 여기로 모이게 export
+export STATUS_FILE="$RUN_DIR/backup-status.json"
+rm -f "$STATUS_FILE"
+status_set operation=backup state=running started_at="$(now_iso)" out_dir="$OUT_DIR" \
+           stop_writes="${STOP_WRITES:-0}"
+trap '_rc=$?; if [ "$_rc" -ne 0 ]; then status_set state=failed exit_code="$_rc" finished_at="$(now_iso)"; fi' EXIT
+
 # 이전 회차 패키지 정리
 # ★ 고정 경로라 직전 패키지가 남아 있습니다. 특히 lexai.db 가 있으면
 #   아래 VACUUM INTO 가 "output file already exists" 로 실패합니다.
 #   또 지난 회차 파일이 섞여 남으면 체크섬이 엉뚱한 파일을 가리킬 수 있어,
 #   이 스크립트가 만드는 파일만 골라 지우고 새로 만듭니다.
-for f in opensearch-snapshots.tar.gz lexai.db source-commit.txt data-fingerprint.tsv checksums.sha256 MANIFEST.txt; do
+for f in opensearch-snapshots.tar.gz lexai.db source-commit.txt data-fingerprint.tsv runtime-versions.txt checksums.sha256 MANIFEST.txt; do
     rm -f "$OUT_DIR/$f"
 done
 
@@ -88,14 +97,22 @@ os_curl -X PUT "$OS_BASE/_snapshot/${SNAPSHOT_REPO}" \
     -H 'Content-Type: application/json' \
     -d "{\"type\":\"fs\",\"settings\":{\"location\":\"${SNAPSHOT_DIR}\",\"compress\":true}}" >/dev/null
 
-docs=$(os_curl "$OS_BASE/${INDEX_NAME}/_count" | grep -o '"count":[0-9]*' | cut -d: -f2)
+# ★ || true 가 없으면 색인이 없을 때 pipefail 로 대입문이 실패하고, set -e 가
+#   메시지 없이 스크립트를 끝냅니다. 원인을 알 수 있게 직접 멈춥니다.
+docs=$( { os_curl "$OS_BASE/${INDEX_NAME}/_count" | grep -o '"count":[0-9]*' | cut -d: -f2; } || true )
+[ -n "$docs" ] || die "색인 ${INDEX_NAME} 을 읽지 못했습니다 — OpenSearch 상태와 색인을 확인하세요 (curl -sk -u … $OS_BASE/_cat/indices)"
 log "   색인 ${docs}건 — 스냅샷 생성 중 (수 분 걸립니다)"
 
 started=$(date +%s)
 # 저장소는 증분 방식이라 두 번째부터는 훨씬 빠릅니다.
 os_curl -X PUT "$OS_BASE/_snapshot/${SNAPSHOT_REPO}/${SNAPSHOT_NAME}?wait_for_completion=true" \
     -H 'Content-Type: application/json' \
-    -d "{\"indices\":\"${INDEX_NAME}\",\"include_global_state\":false}" >/dev/null
+    -d "{\"indices\":\"${INDEX_NAME}\",\"include_global_state\":false}" > "$RUN_DIR/snapshot-create.json"
+# 응답을 버리지 않고 확인합니다. 이름 충돌 · 저장소 권한 오류가 나도 아래의
+# 상태 조회가 이전 스냅샷을 SUCCESS 로 읽어 그대로 진행하던 경로를 막습니다.
+if grep -q '"error"' "$RUN_DIR/snapshot-create.json"; then
+    die "스냅샷 생성 실패: $(head -c 400 "$RUN_DIR/snapshot-create.json")"
+fi
 snap_elapsed=$(( $(date +%s) - started ))
 
 state=$(os_curl "$OS_BASE/_cat/snapshots/${SNAPSHOT_REPO}?h=id,status" | grep "^${SNAPSHOT_NAME} " | awk '{print $2}')
@@ -198,6 +215,14 @@ ok "$(du -h "$OUT_DIR/lexai.db" | cut -f1) — 사용자 ${users} · 메시지 $
 # 테이블별 행 수 · 내용 해시. 대상에서 복원 직후 같은 값을 다시 계산해
 # "데이터가 그대로 왔는가" 를 자동으로 판정합니다(check-data.sh).
 write_data_fingerprint "$OUT_DIR/lexai.db" "$OUT_DIR/data-fingerprint.tsv"
+
+# 런타임 기록 — 대상이 같은 Ollama 버전으로 설치하고(bootstrap → install.sh),
+# 모델 ID 가 같은지 비교합니다(check-data.sh, 다르면 경고).
+{
+    echo "ollama $(ollama_version)"
+    ollama list 2>/dev/null | awk 'NR>1 {print "model "$1" "$2}' || true
+} > "$OUT_DIR/runtime-versions.txt"
+ok "런타임 기록 (Ollama $(ollama_version), 모델 $(grep -c '^model ' "$OUT_DIR/runtime-versions.txt" || true)개)"
 ok "데이터 지문 ($(wc -l < "$OUT_DIR/data-fingerprint.tsv")개 테이블)"
 
 
@@ -227,7 +252,7 @@ ok "${commit_full:0:7} ($(git -C "$REPO_DIR" branch --show-current 2>/dev/null |
 log "4. 체크섬"
 # 전송 중 손상을 대상 환경에서 곧바로 잡기 위한 파일 단위 해시입니다.
 # (압축을 푼 뒤의 내용 대조는 tar 안의 목록 파일이 담당합니다)
-( cd "$OUT_DIR" && sha256sum opensearch-snapshots.tar.gz lexai.db source-commit.txt data-fingerprint.tsv > checksums.sha256 )
+( cd "$OUT_DIR" && sha256sum opensearch-snapshots.tar.gz lexai.db source-commit.txt data-fingerprint.tsv runtime-versions.txt > checksums.sha256 )
 ok "checksums.sha256"
 
 snap_files=$(wc -l < "$SNAPSHOT_DIR/$MANIFEST_NAME")
@@ -259,7 +284,8 @@ LexAI 이관 패키지
   lexai.db                     사용자 ${users} · 메시지 ${msgs}
   source-commit.txt            패키지를 만든 시점의 저장소 커밋 (전체 해시)
   data-fingerprint.tsv         테이블별 행 수 · 내용 해시 (대상에서 자동 비교)
-  checksums.sha256             위 네 파일의 SHA-256
+  runtime-versions.txt         Ollama 버전 · 모델 ID (대상이 같은 버전으로 설치, 모델 비교)
+  checksums.sha256             위 다섯 파일의 SHA-256
 
 정합성 확인
   전송 직후   sha256sum -c checksums.sha256
@@ -269,7 +295,8 @@ LexAI 이관 패키지
 포함하지 않은 것
   Ollama 모델   대상 환경에서 restore.sh 가 자동으로 받습니다
   임베딩 모델   AI 서버가 기동 시 자동으로 받습니다
-  .env          비밀값이라 제외. 대상 환경에서 직접 작성하세요
+  .env          비밀값이라 패키지에는 넣지 않습니다. 저장소째 옮기면 함께 옮겨지고,
+                없으면 대상의 bootstrap 이 새로 발급합니다(이 경우 기존 로그인 토큰만 무효)
 
 저장소째 옮기는 이관 (Beetle 데이터 마이그레이션 등)
   옮길 것  ~/legal-rag-chatbot  (.env 포함)  +  이 패키지 디렉터리
@@ -278,7 +305,8 @@ LexAI 이관 패키지
   실행     NO_UPDATE=1 SNAPSHOT_URI=$OUT_DIR \\
              bash ~/legal-rag-chatbot/deploy/native/bootstrap.sh
            NO_UPDATE=1 이면 GitHub 에서 갱신하지 않고, 체크섬과 소스 커밋이
-           이 패키지와 하나라도 다르면 멈춥니다.
+           이 패키지와 하나라도 다르면 멈춥니다. 이미 LexAI 가 깔린 VM 이면
+           FORCE_CLEAN=1 을 함께 줍니다. 진행 상황: ~/lexai-run/status.json
 
 대상 환경에서 (저장소를 새로 받는 경우)
   1) git clone <repo> && cd legal-rag-chatbot
@@ -300,6 +328,8 @@ ok "MANIFEST.txt"
 
 echo
 log "패키지 완료: $OUT_DIR"
+status_set state=success exit_code=0 finished_at="$(now_iso)" package="$OUT_DIR" \
+           commit="$commit_full" snapshot="$SNAPSHOT_NAME" users="$users" messages="$msgs"
 if [ "$STOP_WRITES" = "1" ]; then
     warn "frontend · tomcat 은 멈춘 상태입니다. 이관을 취소할 때만 다시 켜세요:"
     warn "  sudo systemctl start lexai-tomcat lexai-frontend"

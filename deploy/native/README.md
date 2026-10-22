@@ -51,7 +51,11 @@ journalctl -u lexai-bootstrap-resume -f
 | `SNAPSHOT_URI` | — | 이관 패키지 위치 (`s3://` · `gs://` · `https://`) |
 | `SKIP_DRIVER=1` | — | GPU 이미지를 쓰는 경우 드라이버 설치 생략 |
 | `NO_START=1` | — | 준비만 하고 기동은 하지 않음 |
-| `TARGET_USER` | uid 1000 | root 로 실행될 때 서비스를 돌릴 사용자 |
+| `TARGET_USER` | cb-user → uid 1000 | root 로 실행될 때 서비스를 돌릴 사용자 (cb-user 가 있으면 우선) |
+| `NO_UPDATE=1` | — | **이관 모드.** 옮겨 온 저장소를 갱신하지 않고, 패키지와 커밋 · 체크섬 · 데이터 지문을 대조 |
+| `FORCE_CLEAN=1` | — | 이관 모드에서 대상에 기존 설치가 있어도 진행 (기존 DB 는 `~/lexai-replaced` 로 보관) |
+| `RUN_VERIFY=1` | — | 이관 모드에서도 verify.sh 실행 (기본은 생략 — DB 에 검증 기록이 남으므로) |
+| `OLLAMA_VERSION` | 패키지 기록 | 설치할 Ollama 버전 (이관 모드에서는 원본 버전을 자동 사용) |
 
 **이관 도구가 호출하는 경우** — CB-Tumblebug 의 `postCommands` 처럼 root 로
 실행되면, 대상 사용자를 정해 저장소를 그 사용자로 받은 뒤 같은 스크립트를
@@ -62,8 +66,63 @@ TTY 가 없으면 색상 제어문자를 출력하지 않고, `apt` 가 질문�
 비대화형으로 동작합니다.
 
 시크릿(`JWT_SECRET` · `OPENSEARCH_PASSWORD`)은 자동 발급되어 `.env` 에 들어가고,
-사본이 `~/.lexai-secrets` 에 남습니다. **이관 시 대상 환경에 같은 값을 넣어야**
-기존 색인에 접속할 수 있습니다.
+사본이 `~/.lexai-secrets` 에 남습니다. 저장소째 옮기는 이관에서는 `.env` 가 함께
+옮겨져 로그인 토큰이 그대로 유효합니다. `.env` 없이 옮기면 대상이 새로 발급하고,
+기존 로그인 토큰만 무효가 됩니다(계정 · 비밀번호는 DB 에 있으므로 다시 로그인하면 됨).
+단, 자기 자신이 따로 설치돼 비밀번호가 다른 VM 에 `FORCE_CLEAN=1` 로 이관하면 옮겨 온
+`.env` 와 그 VM 의 OpenSearch 비밀번호가 달라 색인 삭제 단계에서 401 로 멈춥니다 —
+그런 VM 으로 옮길 때는 레포 전송에서 `.env` 를 제외하세요.
+
+## VM 이관 (CM-Beetle + 오케스트레이터)
+
+Beetle 데이터 이관 API(`POST /beetle/migration/data`)는 **전송만** 합니다.
+요청의 `preCmd` · `postCmd` 는 실행되지 않으므로(서버가 `transx.Transfer()` 만 호출),
+백업과 기동은 Tumblebug 리모트 커맨드로 앞뒤에 따로 보냅니다. 모두 `cb-user` 로 실행합니다.
+
+```bash
+# 1) 원본 VM — 쓰기를 멈추고 패키지 생성 (→ ~/lexai-backup/latest, 결과: ~/lexai-run/backup-status.json)
+STOP_WRITES=1 bash ~/legal-rag-chatbot/deploy/native/backup.sh
+
+# 2) Beetle 데이터 이관 2회 (절대경로, 요청당 경로 하나)
+#    ① /home/cb-user/legal-rag-chatbot → 같은 경로, delete: true
+#       exclude: ai/.venv  frontend/node_modules  backend_spring/target  ← source 와 destination 양쪽에
+#       (relay 는 중계 후 보내는 단계가 destination 필터만 써서, 한쪽만 두면 대상의 venv 가 지워짐)
+#    ② /home/cb-user/lexai-backup → 같은 경로 (상위 폴더째)
+
+# 3) 대상 VM — 25~30분 걸리므로 백그라운드로 띄우고 status.json 을 폴링
+NO_UPDATE=1 SNAPSHOT_URI=/home/cb-user/lexai-backup/latest \
+  setsid nohup bash ~/legal-rag-chatbot/deploy/native/bootstrap.sh > ~/lexai-boot.log 2>&1 < /dev/null &
+```
+
+이미 LexAI 가 깔린 VM 이면(원본으로 썼던 VM 으로 돌아오는 경우 포함) 3) 에
+`FORCE_CLEAN=1` 을 붙입니다. 없으면 기존 설치 목록을 보여주고 아무것도 바꾸지 않은 채 멈춥니다.
+이관을 취소하면 원본에서 `sudo systemctl start lexai-tomcat lexai-frontend` 로 다시 켭니다.
+
+이관 모드에서 자동으로 확인되는 것: 소스 커밋 · 패키지 체크섬 · 스냅샷 목록 대조 ·
+**테이블별 행 수와 내용(데이터 보존)** · 서비스 헬스체크 · 모델 GPU 적재 · Ollama 버전과 모델 ID(다르면 경고).
+응답 검증(verify.sh)은 DB 에 기록을 남기므로 첫 배포에서만 돌고, 이관에서는 생략됩니다.
+
+### 상태 파일
+
+오케스트레이터는 종료 코드 대신 이 파일을 폴링합니다. 값은 모두 문자열입니다.
+
+`~/lexai-run/status.json` (bootstrap · up.sh)
+
+| 필드 | 값 |
+| --- | --- |
+| `run_id` | 실행 시각 (`20261022-101500`) — 재부팅 후에도 유지 |
+| `operation` | `deploy` (첫 배포) · `migrate` (`NO_UPDATE=1`) |
+| `state` | `running` · `rebooting` · `prepared` (`NO_START=1`) · `success` · `failed` |
+| `phase` | `bootstrap:1-tools` … `bootstrap:5-package` · `up` · `설치` · `데이터 준비` · `데이터 보존 확인` · `기동` · `검증` · `done` |
+| `commit` | 배포된 저장소 커밋 |
+| `data_check` | `PASS` · `FAIL` · `NA` (이관이 아님) — 상세는 `data_check_report` |
+| `runtime_match` | `yes` · `no` (Ollama 버전 · 모델 ID 가 원본과 같은지, 이관일 때만) |
+| `verify` | `PASS` · `FAIL` · `SKIPPED` · `NA` |
+| `exit_code` · `failed_phase` · `last_error` | 실패 정보 |
+| `started_at` · `updated_at` · `finished_at` · `total_seconds` | 시각 |
+
+`~/lexai-run/backup-status.json` (backup.sh) — `state` · `package` · `commit` · `snapshot` ·
+`users` · `messages` · `stop_writes` · `last_error`.
 
 ## 이미 올라간 환경에서
 

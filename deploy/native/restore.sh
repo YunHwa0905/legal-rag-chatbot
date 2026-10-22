@@ -102,7 +102,7 @@ else
     #
     # 다만 이관 없이 "백지 VM 에서 기동만 되는지" 를 볼 때는 패키지가 없는 게
     # 정상입니다. 그 경우에는 ALLOW_EMPTY_INDEX=1 로 명시적으로 허용하세요.
-    if [ -z "$(ls -A "$SNAPSHOT_DIR" 2>/dev/null | grep -v '^\.gitkeep$')" ]; then
+    if [ -z "$(find "$SNAPSHOT_DIR" -mindepth 1 -maxdepth 1 ! -name .gitkeep 2>/dev/null | head -1)" ]; then
         [ "${ALLOW_EMPTY_INDEX:-0}" = "1" ] || die "스냅샷이 없습니다: $SNAPSHOT_DIR
   이관 패키지를 여기에 풀어두거나, 기동 검증만 하려면 ALLOW_EMPTY_INDEX=1 을 주세요"
 

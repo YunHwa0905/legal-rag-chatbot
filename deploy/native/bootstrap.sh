@@ -30,6 +30,10 @@
 #                  대상에 기존 설치(DB·스냅샷·유닛)가 있으면 멈춤
 #                  verify.sh(응답 검증)는 기본으로 건너뜁니다 — 아래 RUN_VERIFY
 #   RUN_VERIFY=1   이관 모드에서도 verify.sh 를 실행 (verify 계정 · 채팅이 DB 에 남음)
+#   TARGET_USER    root 로 실행될 때 서비스를 돌릴 사용자 (기본: cb-user 가 있으면
+#                  cb-user, 없으면 uid 1000)
+#
+# 진행 상황(오케스트레이터용): ~/lexai-run/status.json — README "상태 파일" 참고
 #   FORCE_CLEAN=1  기존 설치가 있어도 진행 — 서비스 중지 → 색인 삭제 →
 #                  기존 DB 는 ~/lexai-replaced/<시각> 으로 옮김 → 스냅샷 폴더 비움
 #                  (패키지 검증이 모두 끝난 뒤에만 비웁니다)
@@ -139,7 +143,11 @@ fi
 log()  { printf '%b[bootstrap]%b %s\n' "$C_HEAD" "$C_OFF" "$*"; }
 ok()   { printf '%b  OK%b   %s\n' "$C_OK" "$C_OFF" "$*"; }
 warn() { printf '%b  WARN%b %s\n' "$C_WARN" "$C_OFF" "$*" >&2; }
-die()  { printf '%b  FATAL%b %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
+die()  {
+    printf '%b  FATAL%b %s\n' "$C_ERR" "$C_OFF" "$*" >&2
+    if type status_set >/dev/null 2>&1; then status_set "last_error=$*"; fi
+    exit 1
+}
 
 
 # -----------------------------------------------------------
@@ -153,13 +161,19 @@ die()  { printf '%b  FATAL%b %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
 # 그래서 root 면 대상 사용자를 정하고, 저장소를 그 사용자로 받은 뒤
 # 같은 스크립트를 그 사용자로 다시 실행합니다.
 #
-#   TARGET_USER 로 직접 지정할 수 있고, 없으면 uid 1000 을 씁니다
-#   (클라우드 이미지의 기본 로그인 계정이 대개 uid 1000 입니다).
+#   TARGET_USER 로 직접 지정할 수 있고, 없으면 cb-user(Tumblebug · Beetle 이
+#   만드는 VM 의 계정)를, 그것도 없으면 uid 1000 을 씁니다.
+#   ★ uid 1000 을 먼저 보면 안 됩니다. AWS Deep Learning AMI 에서는 uid 1000 이
+#     ubuntu 이고 cb-user 는 그 뒤에 만들어져, 엉뚱한 사용자로 설치됩니다.
 # -----------------------------------------------------------
 if [ "$(id -u)" -eq 0 ] && [ "${LEXAI_REEXEC:-0}" != "1" ]; then
     _user="${TARGET_USER:-${SUDO_USER:-}}"
     if [ -z "$_user" ] || [ "$_user" = "root" ]; then
-        _user="$( { getent passwd 1000 | cut -d: -f1; } || true )"
+        if getent passwd cb-user >/dev/null 2>&1; then
+            _user="cb-user"
+        else
+            _user="$( { getent passwd 1000 | cut -d: -f1; } || true )"
+        fi
     fi
     [ -n "$_user" ] || die "일반 사용자를 찾지 못했습니다. TARGET_USER 로 지정하세요."
 
@@ -204,12 +218,59 @@ SECRET_FILE="$HOME/.lexai-secrets"
 RESUME_UNIT="lexai-bootstrap-resume"
 DRIVER_TRIES_FILE="$HOME/.lexai-driver-tries"
 DRIVER_MAX_TRIES="${DRIVER_MAX_TRIES:-2}"
+RUN_DIR="${RUN_DIR:-$HOME/lexai-run}"
+STATUS_FILE="$RUN_DIR/status.json"
+
+# -----------------------------------------------------------
+# 상태 파일 (오케스트레이터용)
+#
+# 이 스크립트는 25~30분 걸려 백그라운드로 띄울 수밖에 없어, 호출한 쪽이
+# 종료 코드를 받지 못합니다. 대신 ~/lexai-run/status.json 을 폴링합니다.
+# 형식은 common.sh 의 status_set 과 같습니다(이 시점엔 저장소가 없을 수 있어
+# 여기에 따로 둡니다). 필드는 deploy/native/README.md "상태 파일" 절 참고.
+# -----------------------------------------------------------
+status_set() {
+    mkdir -p "$RUN_DIR" 2>/dev/null || return 0
+    python3 - "$STATUS_FILE" "$@" <<'PY' 2>/dev/null || true
+import json, os, sys, time
+path = sys.argv[1]
+try:
+    data = json.load(open(path))
+except Exception:
+    data = {}
+for kv in sys.argv[2:]:
+    k, _, v = kv.partition("=")
+    data[k] = v
+data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(data, f, ensure_ascii=False, indent=1)
+os.replace(tmp, path)
+PY
+}
+now_iso() { date '+%Y-%m-%dT%H:%M:%S%z'; }
+
+if [ "$RESUME" = "1" ]; then
+    # 재부팅 뒤 이어서 실행 — 같은 기록(run_id)을 이어 씁니다.
+    LEXAI_RUN_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("run_id",""))' "$STATUS_FILE" 2>/dev/null || true)"
+    status_set state=running phase=bootstrap:resume
+else
+    rm -f "$STATUS_FILE"
+    LEXAI_RUN_ID="$(date +%Y%m%d-%H%M%S)"
+    status_set run_id="$LEXAI_RUN_ID" \
+               operation="$([ "$NO_UPDATE" = "1" ] && echo migrate || echo deploy)" \
+               state=running phase=bootstrap started_at="$(now_iso)" \
+               force_clean="$FORCE_CLEAN" data_check=NA verify=NA
+fi
+export LEXAI_RUN_ID
+trap '_rc=$?; if [ "$_rc" -ne 0 ]; then status_set state=failed exit_code="$_rc" finished_at="$(now_iso)"; fi' EXIT
 
 
 # -----------------------------------------------------------
 # 1. 기본 도구
 # -----------------------------------------------------------
 log "1. 기본 도구"
+status_set phase=bootstrap:1-tools
 silence_needrestart
 # ★ lspci 가 빠지면 안 됩니다. 아래 4절이 GPU 유무를 lspci 로 판정하는데,
 #   명령이 없으면 출력이 비어 "GPU 없음"으로 읽히고 드라이버 설치를 조용히
@@ -231,6 +292,7 @@ ok "git $(git --version | cut -d' ' -f3)"
 # git 저장소가 아닌 디렉터리는 타임스탬프를 붙여 비켜둡니다.
 # -----------------------------------------------------------
 log "2. 저장소"
+status_set phase=bootstrap:2-repo
 # -----------------------------------------------------------
 # NO_UPDATE=1 (이관 모드)
 #
@@ -270,7 +332,9 @@ NATIVE_DIR="$REPO_DIR/deploy/native"
 # 이미 .env 가 있으면 건드리지 않습니다(재실행 시 비밀번호가 바뀌면 기존
 # OpenSearch 색인에 접속하지 못합니다).
 # -----------------------------------------------------------
+status_set commit="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)"
 log "3. 환경 파일"
+status_set phase=bootstrap:3-env
 if [ -f "$REPO_DIR/.env" ]; then
     ok "이미 존재 — 건너뜀"
 else
@@ -298,7 +362,7 @@ PY
     chmod 600 "$SECRET_FILE"
 
     ok "생성 — 시크릿 2종 자동 발급"
-    warn "시크릿 사본: $SECRET_FILE (이관 시 대상 환경에 같은 값을 넣어야 합니다)"
+    ok "시크릿 사본: $SECRET_FILE (저장소째 이관하면 .env 가 함께 옮겨집니다)"
 fi
 
 
@@ -312,6 +376,7 @@ fi
 # 진행 상황: journalctl -u lexai-bootstrap-resume -f
 # -----------------------------------------------------------
 log "4. GPU 드라이버"
+status_set phase=bootstrap:4-driver
 if [ "${SKIP_DRIVER:-0}" = "1" ]; then
     ok "SKIP_DRIVER=1 — 건너뜀"
 elif gpu_ready; then
@@ -390,6 +455,7 @@ EOF
 
     warn "재부팅합니다. 재접속 후 아래로 진행 상황을 확인하세요:"
     warn "  journalctl -u ${RESUME_UNIT} -f"
+    status_set state=rebooting phase=bootstrap:4-driver
     sleep 3
     sudo reboot
     exit 0
@@ -410,6 +476,7 @@ fi
 # (색인 없이 기동하면 서비스는 정상으로 보이는데 답변만 근거가 없습니다).
 # -----------------------------------------------------------
 log "5. 이관 패키지"
+status_set phase=bootstrap:5-package
 # NO_UPDATE=1 (이관 모드) 에서는 검증을 하나도 건너뛰지 않습니다.
 #   - checksums.sha256 · lexai.db · source-commit.txt 가 전부 있어야 하고
 #   - 세 파일의 체크섬이 모두 맞아야 하며
@@ -546,6 +613,21 @@ else
         die "data-fingerprint.tsv 가 없습니다 — 데이터 보존을 판정할 수 없습니다. 지금 버전의 backup.sh 로 패키지를 다시 만드세요"
     fi
 
+    # 런타임 기록 — 원본과 같은 Ollama 버전으로 설치합니다(없으면 최신).
+    # 데이터가 아니라 답변 조건이라, 없어도 멈추지 않습니다.
+    HAVE_RT=0
+    if fetch "${SNAPSHOT_URI%/}/runtime-versions.txt" "$tmp/runtime-versions.txt" 2>/dev/null; then
+        if has_sum runtime-versions.txt; then
+            check_sum runtime-versions.txt || die "runtime-versions.txt 체크섬 불일치 — 전송이 온전하지 않습니다"
+        fi
+        HAVE_RT=1
+        src_ollama="$(awk '$1=="ollama"{print $2}' "$tmp/runtime-versions.txt")"
+        if [ -n "$src_ollama" ] && [ -z "${OLLAMA_VERSION:-}" ]; then export OLLAMA_VERSION="$src_ollama"; fi
+        ok "런타임 기록 확인 (원본 Ollama ${src_ollama:-?})"
+    elif [ "$STRICT" = "1" ]; then
+        warn "runtime-versions.txt 가 없습니다 — Ollama 는 최신 버전으로 설치됩니다"
+    fi
+
     # 압축 해제 전에 공간을 봅니다. 풀다가 No space left 로 죽으면 반쯤 풀린
     # 스냅샷이 남아 다음 시도의 정합성 대조까지 막습니다.
     # (풀린 크기는 아카이브의 약 1.15배 — 1차 실행 5.27GB → 6.0GB)
@@ -613,10 +695,10 @@ $(printf '    %s\n' "${found[@]}")
 
         # 3) DB 는 지우지 않고 옮겨 둡니다(작아서 공간 부담이 없고, 되돌릴 길을 남깁니다).
         replaced="$HOME/lexai-replaced/$(date +%Y%m%d-%H%M%S)"
-        for f in lexai.db lexai.db-wal lexai.db-shm lexai.db-journal source-fingerprint.tsv; do
+        for f in lexai.db lexai.db-wal lexai.db-shm lexai.db-journal source-fingerprint.tsv source-runtime.txt; do
             if [ -e "$DATA_DIR/$f" ]; then mkdir -p "$replaced"; mv "$DATA_DIR/$f" "$replaced/"; fi
         done
-        for f in "$DATA_DIR"/source-fingerprint.checked-*.tsv; do
+        for f in "$DATA_DIR"/source-fingerprint.checked-*.tsv "$DATA_DIR"/source-runtime.checked-*.txt; do
             if [ -e "$f" ]; then mkdir -p "$replaced"; mv "$f" "$replaced/"; fi
         done
         [ -d "$replaced" ] && ok "기존 DB 보관: $replaced"
@@ -639,6 +721,9 @@ $(printf '    %s\n' "${found[@]}")
     if [ "$HAVE_FP" = "1" ]; then
         cp "$tmp/data-fingerprint.tsv" "$DATA_DIR/source-fingerprint.tsv"
     fi
+    if [ "$HAVE_RT" = "1" ]; then
+        cp "$tmp/runtime-versions.txt" "$DATA_DIR/source-runtime.txt"
+    fi
     rm -rf "$tmp"
 fi
 
@@ -650,6 +735,7 @@ chmod +x "$NATIVE_DIR"/*.sh
 
 if [ "$NO_START" = "1" ]; then
     echo
+    status_set state=prepared phase=bootstrap:done finished_at="$(now_iso)"
     log "준비 완료 (NO_START=1 — 기동은 하지 않았습니다)"
     echo "  기동: bash $NATIVE_DIR/up.sh"
     exit 0
@@ -668,5 +754,9 @@ log "6. up.sh 실행"
 if [ "$NO_UPDATE" = "1" ]; then
     export VERIFY_GATE="${VERIFY_GATE:-0}"
     if [ "$RUN_VERIFY" != "1" ]; then export SKIP_VERIFY=1; fi
+    # 압축 해제한 스냅샷의 목록 파일(contents.tsv)이 없으면 정합성 대조를
+    # 건너뛰지 않고 실패로 봅니다(common.sh verify_manifest).
+    export REQUIRE_MANIFEST=1
 fi
+status_set phase=up
 exec bash "$NATIVE_DIR/up.sh"

@@ -103,7 +103,14 @@ fi
 
 echo
 log "남은 포트 확인"
-for p in "$FRONTEND_PORT" "$AI_PORT" "$TOMCAT_PORT" "$OPENSEARCH_PORT"; do
+# 멈추라고 한 대상의 포트만 봅니다. backup.sh STOP_WRITES 처럼 일부만 멈출 때
+# 일부러 켜 둔 OpenSearch · AI 포트까지 "아직 점유" 로 경고하던 것을 막습니다.
+check_ports=()
+want frontend   && check_ports+=("$FRONTEND_PORT")
+want ai         && check_ports+=("$AI_PORT")
+want tomcat     && check_ports+=("$TOMCAT_PORT")
+want opensearch && check_ports+=("$OPENSEARCH_PORT")
+for p in "${check_ports[@]}"; do
     if port_in_use "$p"; then
         warn "포트 $p 가 아직 점유돼 있습니다"
         ss -tlnp 2>/dev/null | grep ":$p " | head -1
