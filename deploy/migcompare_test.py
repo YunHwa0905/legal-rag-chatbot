@@ -110,7 +110,10 @@ def main():
     assert rc == 0, (out, err)
     assert r["q03"][0] == "WARN" and "환경 차이" in r["q03"][1], r["q03"]
     assert r["env:ollama_version"][0] == "INFO"
-    assert "이관 동등성: WARN" in out, out
+    # WidgetRAG 와 같은 규칙 — WARN 은 테스트 결과를 바꾸지 않는다 (콘솔 배지가 초록 PASS)
+    assert "이관 동등성: 테스트1 PASS · 테스트2 PASS" in out, out
+    assert any(ln.startswith("T2") and " PASS " in ln and ln.split()[4] == "1" for ln in out.splitlines()), out
+    assert open(os.path.join(ev, "c2", "verdict.txt")).read().strip() == "PASS"
     print("c2 ok")
 
     # 3) 재현성 문제 — 첫 답만 다르고 다시 물으면 소스와 같음

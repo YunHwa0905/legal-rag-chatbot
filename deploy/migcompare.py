@@ -521,11 +521,11 @@ def append_csv(path, meta, rows):
 
 
 def verdict(rows, test):
+    """테스트별 결과 — WidgetRAG migcheck.py 와 같은 규칙: FAIL 이 하나라도 있으면 FAIL, PASS 가 없으면 미수행, 아니면 PASS.
+    WARN(검색 같음 · 환경 차이로 문장만 다름 등)은 결과를 바꾸지 않는다 — 문항 · 항목 줄에 WARN 으로 남는다."""
     rs = [r[4] for r in rows if r[0] == test]
     if "FAIL" in rs:
         return "FAIL"
-    if "WARN" in rs:
-        return "WARN"
     if "PASS" not in rs:
         return "미수행"
     return "PASS"
@@ -572,10 +572,14 @@ def cmd_compare(a):
 
     tests = ("T1-1", "T1-2", "T1-3", "T2")
     v = {t: verdict(R.rows, t) for t in tests}
-    overall = "FAIL" if R.count("FAIL") else ("WARN" if R.count("WARN") else "PASS")
+    # 전체 — WidgetRAG 와 같게 테스트1(T1-1 · T1-2 · T1-3) · 테스트2(T2) 로 묶는다. WARN 은 판정을 바꾸지 않는다.
+    t1 = [v["T1-1"], v["T1-2"], v["T1-3"]]
+    test1 = "FAIL" if "FAIL" in t1 else ("미수행" if "미수행" in t1 else "PASS")
+    test2 = v["T2"]
+    overall = "FAIL" if R.count("FAIL") else "PASS"
     desc = {"T1-1": "서비스 수 · 이름", "T1-2": "패키지 파일 (이름 · 바이트 · 해시)",
             "T1-3": "데이터 (DB 지문 · 색인 문서 수)", "T2": "LLM 응답 (검색 결과 · 답변)"}
-    lines = ["이관 동등성: %s" % overall,
+    lines = ["이관 동등성: 테스트1 %s · 테스트2 %s" % (test1, test2),
              "일시 %s · 타겟 %s · 소스 %s · 패키지 %s" % (a.timestamp, a.form, src_form, pkg_name), "",
              "%-6s %-6s %5s %5s %5s %5s %5s  %s" % ("test", "판정", "PASS", "FAIL", "WARN", "SKIP", "INFO", "항목")]
     for t in tests:
