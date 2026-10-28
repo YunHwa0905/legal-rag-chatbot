@@ -75,6 +75,52 @@ if [ -f "$DATA_DIR/source-fingerprint.tsv" ]; then
 fi
 phase "기동"        bash "$HERE/start.sh"
 
+# 이관 동등성 비교 — bootstrap 이 $DATA_DIR/source-package/ 에 둔 기준(source-info.json · golden.json ·
+# 패키지 파일 대조 결과)과 이 VM 을 대조해 ~/lexai-run/migration-compare.csv(WidgetRAG 와 같은 형식)에
+# 누적하고, 증적을 ~/lexai-run/migration-<시각>/ 에 남깁니다. FAIL 이어도 멈추지 않습니다 —
+# 판정은 오케스트레이터가 비교표로 합니다(status.json compare 에도 적습니다).
+# AI 서버에 직접 묻습니다 — 대화가 DB 에 남지 않습니다. 검증(verify.sh)과 같은 시각(RUN_TS)을 씁니다.
+#   COMPARE=0  이 단계를 건너뜁니다
+export RUN_TS="${RUN_TS:-$(date '+%Y-%m-%d %H:%M:%S')}"
+COMPARE_RESULT="건너뜀"
+SRC_PKG="$DATA_DIR/source-package"
+if [ -d "$SRC_PKG" ] && [ -n "$(ls -A "$SRC_PKG" 2>/dev/null)" ] && [ "${COMPARE:-1}" != "0" ]; then
+    echo
+    printf '%s━━ 이관 동등성 비교 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$C_HEAD" "$C_OFF"
+    status_set phase=이관동등성비교
+    cstart=$(date +%s)
+    EVI="$RUN_DIR/migration-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$EVI"
+    {
+        echo "ollama $(ollama_version)"
+        ollama list 2>/dev/null | awk 'NR>1 {print "model "$1" "$2}' || true
+    } > "$EVI/target-runtime.txt"
+    load_opensearch_creds
+    tdocs=$( { os_curl "$OS_BASE/${INDEX_NAME:-legal_documents}/_count" | grep -o '"count":[0-9]*' | cut -d: -f2; } 2>/dev/null || true )
+    tsvcs=""
+    for u in $UNITS ollama; do
+        if systemctl is-active --quiet "$u" 2>/dev/null; then tsvcs="$tsvcs ${u#lexai-}"; fi
+    done
+    case "$DATA_RESULT" in PASS) dc=PASS ;; *) dc=NA ;; esac
+    files_rows=()
+    [ -f "$SRC_PKG/files-rows.tsv" ] && files_rows=(--files-rows "$SRC_PKG/files-rows.tsv")
+    crc=0
+    OLLAMA_MODEL="${OLLAMA_MODEL:-$(env_value OLLAMA_MODEL)}" EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-$(env_value EMBEDDING_DEVICE)}" \
+    python3 "$REPO_DIR/deploy/migcompare.py" compare --package "$SRC_PKG" \
+        --url "${AI_URL:-http://127.0.0.1:${AI_PORT}}" --evidence "$EVI" --form "${FORM:-native}" \
+        --docs "$tdocs" --services "$tsvcs" --data-check "$dc" \
+        --runtime "$EVI/target-runtime.txt" --csv "$RUN_DIR/migration-compare.csv" --timestamp "$RUN_TS" \
+        "${files_rows[@]}" || crc=$?
+    COMPARE_RESULT="$(cat "$EVI/verdict.txt" 2>/dev/null || echo ERROR)"
+    [ "$crc" -le 1 ] || COMPARE_RESULT="ERROR"
+    status_set compare="$COMPARE_RESULT" compare_dir="$EVI"
+    case "$COMPARE_RESULT" in
+        PASS) ok "이관 동등성 PASS (증적: $EVI)" ;;
+        WARN) warn "이관 동등성 WARN — 이관과 무관하거나 환경 차이인 항목이 있습니다 (증적: $EVI/summary.txt)" ;;
+        *)    warn "이관 동등성 ${COMPARE_RESULT} — $EVI/summary.txt 를 확인하세요" ;;
+    esac
+    PHASE_NAMES+=("이관 동등성 비교"); PHASE_SECS+=($(( $(date +%s) - cstart )))
+fi
 # 검증은 실패해도 스크립트를 죽이지 않습니다. 어디까지 됐는지 보여주고
 # 마지막에 결과만 알립니다.
 VERIFY_RESULT="건너뜀"
@@ -100,6 +146,7 @@ done
 printf '  %-12s %4d초\n' "합계" "$TOTAL"
 echo
 echo "  데이터 보존 : $DATA_RESULT"
+echo "  이관 동등성 : $COMPARE_RESULT"
 echo "  검증 결과 : $VERIFY_RESULT"
 echo "  Frontend  : http://127.0.0.1:${FRONTEND_PORT}"
 echo "  종료      : bash deploy/native/stop.sh"

@@ -24,6 +24,9 @@
 #   STOP_WRITES=1     쓰기 중지 후 패키징
 #   KEEP_SNAPSHOTS    남길 스냅샷 수   기본 2
 #   ARCHIVE_COMPRESS  none 이면 압축 생략
+#   GOLDEN=0          골든(질문별 검색 결과 · 답변)을 뜨지 않음 (기본 1 — AI 서버에 닿지 않으면 경고만)
+#   GOLDEN_REPEAT     골든 질문마다 묻는 횟수 (기본 2 — 소스끼리도 같은지 봅니다)
+#   AI_URL            AI 서버 주소 (기본 http://127.0.0.1:8000 — docker-compose.yml 이 VM 안에만 엽니다)
 #
 # 진행 상황(오케스트레이터용): ~/lexai-run/backup-status.json
 # ===========================================================
@@ -50,8 +53,10 @@ SNAP_DIR="$PWD/deploy/snapshots"
 MANIFEST_NAME="contents.tsv"
 FRONTEND_PORT="${FRONTEND_PORT:-$(_env FRONTEND_PORT)}"; FRONTEND_PORT="${FRONTEND_PORT:-80}"
 STOP_WRITES="${STOP_WRITES:-0}"
-DEPLOY_FILES="docker-compose.yml docker-compose.registry.yml deploy/schema.sqlite.sql deploy.sh backup.sh verify.sh datacheck.sh"
+DEPLOY_FILES="docker-compose.yml docker-compose.registry.yml deploy/schema.sqlite.sql deploy.sh backup.sh verify.sh datacheck.sh migcompare.py golden-questions.txt"
 PKG_FILES="opensearch-snapshots.tar.gz lexai.db source-commit.txt data-fingerprint.tsv runtime-versions.txt images.lock deploy-files.sha256"
+# 이관 비교 기준 — 없어도 패키지는 쓸 수 있습니다(타겟 비교표에서 SKIP). 있으면 체크섬에 넣습니다.
+OPT_FILES="source-info.json golden.json"
 
 if [ -t 1 ]; then
     C_HEAD=$'\033[1;35m'; C_OK=$'\033[0;32m'
@@ -134,7 +139,7 @@ done
 mkdir -p "$OUT_DIR"
 # 이전 회차 패키지 정리 — 고정 경로라 지난 파일이 섞이면 체크섬이 엉뚱한 파일을
 # 가리킬 수 있습니다. 이 스크립트가 만드는 파일만 골라 지웁니다.
-for f in $PKG_FILES checksums.sha256 MANIFEST.txt; do rm -f "$OUT_DIR/$f"; done
+for f in $PKG_FILES $OPT_FILES checksums.sha256 MANIFEST.txt package-files.tsv; do rm -f "$OUT_DIR/$f"; done
 
 
 # -----------------------------------------------------------
@@ -325,8 +330,46 @@ ollama_v="$( { dex ollama ollama --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]
 ok "런타임 기록 (Ollama ${ollama_v:-?}, 모델 $(grep -c '^model ' "$OUT_DIR/runtime-versions.txt" || true)개)"
 
 
-log "4. 체크섬"
-( cd "$OUT_DIR" && sha256sum $PKG_FILES > checksums.sha256 )
+log "4. 이관 비교 기준"
+status_set phase=compare-baseline
+# 타겟이 기동한 뒤 같은 방식으로 다시 재서 대조합니다(migcompare.py compare → migration-compare.csv).
+#   source-info.json  서비스 목록 · 색인 문서 수 · 환경(GPU · 드라이버 · Ollama · 모델) · 생성 설정(온도 · seed)
+#   golden.json       골든 질문마다 검색 결과(근거 문서 ID · 순서)와 답변 — GOLDEN_REPEAT 번 물어 소스끼리도 같은지
+# AI 서버에 직접 묻습니다 — 대화가 DB 에 남지 않아 데이터 지문에 영향이 없고, STOP_WRITES 로 tomcat 이 멈춰 있어도 됩니다.
+AI_HOST_PORT="${AI_HOST_PORT:-$(_env AI_HOST_PORT)}"
+AI_URL="${AI_URL:-http://127.0.0.1:${AI_HOST_PORT:-8000}}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-$(_env OLLAMA_MODEL)}"; export OLLAMA_MODEL="${OLLAMA_MODEL:-legal-gemma}"
+EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-$(_env EMBEDDING_DEVICE)}"; export EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-cpu}"
+svcs="$( { compose ps --status running --services 2>/dev/null | sort | tr '\n' ' '; } || true )"
+if python3 migcompare.py source-info --out "$OUT_DIR/source-info.json" --form compose --docs "$docs" \
+        --services "$svcs" --runtime "$OUT_DIR/runtime-versions.txt" --url "$AI_URL"; then
+    ok "source-info.json — 서비스 $(printf '%s' "$svcs" | wc -w)개 · 색인 ${docs}건"
+else
+    warn "source-info.json 을 만들지 못했습니다 — 타겟 비교표의 서비스 · 문서 수 항목이 SKIP 됩니다"
+    rm -f "$OUT_DIR/source-info.json"
+fi
+if [ "${GOLDEN:-1}" = "0" ]; then
+    ok "골든 건너뜀 (GOLDEN=0) — 타겟은 LLM 응답 비교를 하지 않습니다"
+else
+    log "   골든 질문 (AI 서버 $AI_URL · 질문마다 ${GOLDEN_REPEAT:-2}회)"
+    grc=0
+    python3 migcompare.py golden-build --url "$AI_URL" --questions golden-questions.txt \
+        --out "$OUT_DIR/golden.json" --repeat "${GOLDEN_REPEAT:-2}" --runtime "$OUT_DIR/runtime-versions.txt" || grc=$?
+    if [ "$grc" = "0" ]; then
+        ok "golden.json"
+    else
+        rm -f "$OUT_DIR/golden.json"
+        if [ "$grc" = "3" ]; then
+            warn "AI 서버($AI_URL)에 닿지 않아 골든을 뜨지 못했습니다 — docker-compose.yml 이 127.0.0.1:8000 을 여는 판으로 다시 띄웠는지 확인하세요"
+        else
+            warn "골든을 뜨지 못했습니다 (종료 코드 $grc) — 타겟은 LLM 응답 비교를 하지 않습니다"
+        fi
+    fi
+fi
+
+
+log "5. 체크섬"
+( cd "$OUT_DIR" && sha256sum $PKG_FILES $(for f in $OPT_FILES; do [ -f "$f" ] && printf '%s ' "$f"; done) > checksums.sha256 )
 ok "checksums.sha256 ($(wc -l < "$OUT_DIR/checksums.sha256")개 파일)"
 
 if [ "$SERVING" = "1" ]; then
@@ -341,7 +384,7 @@ fi
 snap_files=$(wc -l < "$SNAP_DIR/$MANIFEST_NAME")
 snap_bytes=$(awk -F'\t' '{s+=$2} END {print s+0}' "$SNAP_DIR/$MANIFEST_NAME")
 
-log "5. 매니페스트"
+log "6. 매니페스트"
 cat > "$OUT_DIR/MANIFEST.txt" <<EOF
 LexAI 이관 패키지 (Docker Compose 형태에서 생성)
 생성 시각   : $(date '+%Y-%m-%d %H:%M:%S %Z')
@@ -359,7 +402,10 @@ LexAI 이관 패키지 (Docker Compose 형태에서 생성)
   images.lock                  원본에서 돌던 이미지 digest (대상이 같은 digest 로 받음)
   data-fingerprint.tsv         테이블별 행 수 · 내용 해시 (대상에서 자동 비교)
   runtime-versions.txt         Ollama 버전 · 모델 ID (대상에서 비교, 다르면 경고)
+  source-info.json             서비스 목록 · 색인 문서 수 · 환경 · 생성 설정 (이관 비교 기준)
+  golden.json                  골든 질문의 검색 결과 · 답변 (이관 비교 기준, GOLDEN=0 이면 없음)
   checksums.sha256             위 파일 전부의 SHA-256
+  package-files.tsv            이 폴더 파일 전부의 이름 · 바이트 · SHA-256 (대상이 개수 · 용량까지 대조)
 
 포함하지 않은 것
   Ollama 모델 · 임베딩 모델    대상에서 자동으로 받습니다
@@ -382,6 +428,11 @@ LexAI 이관 패키지 (Docker Compose 형태에서 생성)
   네이티브 : curl -fsSL <bootstrap.sh> | SNAPSHOT_URI=<이 디렉터리> bash
 EOF
 ok "MANIFEST.txt"
+
+# 파일 목록 — 이 폴더의 파일 전부(이름 · 바이트 · sha256). 맨 마지막에 만들어 MANIFEST 까지 담습니다.
+python3 migcompare.py inventory "$OUT_DIR" --out "$OUT_DIR/package-files.tsv" \
+    || die "package-files.tsv 를 만들지 못했습니다"
+ok "package-files.tsv ($(wc -l < "$OUT_DIR/package-files.tsv")개 파일)"
 
 status_set state=success phase=done exit_code=0 finished_at="$(now_iso)" docs="$docs" users="$users" msgs="$msgs"
 

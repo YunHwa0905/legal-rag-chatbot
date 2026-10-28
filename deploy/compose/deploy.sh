@@ -572,7 +572,7 @@ phase compose:4-files
 mkdir -p "$DEPLOY_DIR/deploy/snapshots"
 
 # 배포 디렉터리에 두는 파일 — 이관 패키지의 deploy-files.sha256 도 이 목록입니다.
-DEPLOY_FILES="docker-compose.yml docker-compose.registry.yml deploy/schema.sqlite.sql deploy.sh backup.sh verify.sh datacheck.sh"
+DEPLOY_FILES="docker-compose.yml docker-compose.registry.yml deploy/schema.sqlite.sql deploy.sh backup.sh verify.sh datacheck.sh migcompare.py golden-questions.txt"
 
 if [ "$NO_UPDATE" = "1" ]; then
     # 이관 모드: 옮겨 온 파일만 씁니다. 하나라도 없으면 멈춥니다.
@@ -615,13 +615,16 @@ else
     fetch_raw "deploy/compose/verify.sh"      "verify.sh"
     fetch_raw "deploy/compose/backup.sh"      "backup.sh"
     fetch_raw "deploy/compose/datacheck.sh"   "datacheck.sh"
+    # 이관 동등성 비교 — backup.sh 가 기준을 뜨고, 이관 뒤 이 스크립트가 대조합니다.
+    fetch_raw "deploy/migcompare.py"          "migcompare.py"
+    fetch_raw "deploy/golden-questions.txt"   "golden-questions.txt"
     chmod +x "$DEPLOY_DIR/verify.sh" "$DEPLOY_DIR/backup.sh" "$DEPLOY_DIR/datacheck.sh"
     # deploy.sh 자신도 같은 커밋의 사본으로 맞춥니다(위 0절은 브랜치로 받았습니다).
     # 실행 중인 파일을 덮어쓰면 bash 가 남은 부분을 깨뜨려 읽으므로, 다음 실행부터
     # 적용되도록 이름을 바꿔 원자적으로 교체합니다(실행 중인 inode 는 그대로).
     if [ "$DEPLOY_COMMIT" != "unknown" ]; then fetch_raw "deploy/compose/deploy.sh" "deploy.sh"; chmod +x "$DEPLOY_DIR/deploy.sh"; fi
     printf '%s\n' "$DEPLOY_COMMIT" > "$DEPLOY_DIR/DEPLOY_COMMIT"
-    ok "파일 7개 수신 (커밋 ${DEPLOY_COMMIT:0:7})"
+    ok "파일 9개 수신 (커밋 ${DEPLOY_COMMIT:0:7})"
 fi
 status_set commit="$DEPLOY_COMMIT"
 
@@ -991,6 +994,34 @@ $(printf '%s\n' "$bad" | sed 's/^/    /')"
         fi
     fi
 
+    # --- 이관 비교 기준 -----------------------------------------
+    # 없어도 멈추지 않습니다(옛 패키지 · GOLDEN=0). 비교표에서 SKIP 으로 남습니다.
+    for f in source-info.json golden.json package-files.tsv; do
+        if fetch "${SNAPSHOT_URI%/}/$f" "$tmp/$f" 2>/dev/null; then
+            materialize "$tmp/$f"
+            if has_sum "$f"; then check_sum "$f" || die "$f 체크섬 불일치 — 전송이 온전하지 않습니다"; fi
+        else
+            rm -f "$tmp/$f"
+        fi
+    done
+    # 패키지 파일 대조(T1-2) — 지금 합니다. 복원 단계가 $tmp 의 DB 를 지우므로 나중에는 잴 수 없습니다.
+    if [ -f "$tmp/package-files.tsv" ] && command -v python3 >/dev/null 2>&1; then
+        if [ -d "$SNAPSHOT_URI" ]; then
+            cmp_pkg="$(readlink -f "$SNAPSHOT_URI")"
+        else
+            # 원격 패키지 — 목록에 있는데 아직 받지 않은 작은 파일(MANIFEST 등)을 마저 받습니다.
+            cmp_pkg="$tmp"
+            while IFS=$'\t' read -r f _ _; do
+                [ -n "$f" ] && [ ! -e "$tmp/$f" ] && { fetch "${SNAPSHOT_URI%/}/$f" "$tmp/$f" 2>/dev/null || rm -f "$tmp/$f"; }
+            done < "$tmp/package-files.tsv"
+        fi
+        if python3 "$DEPLOY_DIR/migcompare.py" files-check --package "$cmp_pkg" --out "$tmp/files-rows.tsv"; then
+            ok "패키지 파일 $(grep -c . "$tmp/package-files.tsv")개 — 이름 · 바이트 · 해시 원본과 같음"
+        else
+            warn "패키지 파일 대조 FAIL — 비교표(migration-compare.csv)에 남깁니다"
+        fi
+    fi
+
     # --- 기존 설치 확인 ---------------------------------------
     # ★ 이미 LexAI 가 돌던 VM 에 다시 이관하면(A→B→A) 옛 볼륨이 남아 옛 색인 ·
     #   옛 DB 가 그대로 쓰입니다. 예전에는 "사용자가 있으면 복원 건너뜀" 이라
@@ -1352,6 +1383,50 @@ fi
 
 
 # -----------------------------------------------------------
+# 10-1. 이관 동등성 비교
+#
+# backup.sh 가 패키지에 남긴 기준(source-info.json · golden.json · package-files.tsv)과
+# 이 VM 을 대조해 ~/lexai-run/migration-compare.csv(WidgetRAG 와 같은 형식)에 누적하고,
+# 증적을 ~/lexai-run/migration-<시각>/ 에 남깁니다. FAIL 이어도 멈추지 않습니다 —
+# 판정은 오케스트레이터가 비교표로 합니다(status.json compare 에도 적습니다).
+# AI 서버에 직접 묻습니다 — 대화가 DB 에 남지 않습니다. 검증(verify.sh)과 같은 시각(RUN_TS)을
+# 써서 결과표 · 비교표의 같은 회차가 묶이게 합니다.
+#   COMPARE=0  이 단계를 건너뜁니다 (기본: 패키지로 이관했으면 실행)
+# -----------------------------------------------------------
+export RUN_TS="${RUN_TS:-$(date '+%Y-%m-%d %H:%M:%S')}"
+COMPARE_RESULT="건너뜀"
+if [ "$HAVE_PKG" = "1" ] && [ "${COMPARE:-1}" != "0" ] && command -v python3 >/dev/null 2>&1; then
+    phase_begin "이관 동등성 비교"
+    EVI="$RUN_DIR/migration-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$EVI"
+    # 이 VM 의 런타임 — 원본 runtime-versions.txt 와 같은 형식
+    {
+        echo "ollama $( { compose exec -T ollama ollama --version </dev/null 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | tail -1; } || true )"
+        { compose exec -T ollama ollama list </dev/null 2>/dev/null | awk 'NR>1 {print "model "$1" "$2}'; } || true
+    } > "$EVI/target-runtime.txt"
+    [ -f "$RUN_DIR/data-check.txt" ] && cp "$RUN_DIR/data-check.txt" "$EVI/" 2>/dev/null || true
+    case "$DATA_RESULT" in PASS) dc=PASS ;; *) dc=NA ;; esac
+    cmp_svcs="$( { compose ps --status running --services 2>/dev/null | sort | tr '\n' ' '; } || true )"
+    AI_HOST_PORT="${AI_HOST_PORT:-$(_env_from_file AI_HOST_PORT)}"
+    crc=0
+    OLLAMA_MODEL="${OLLAMA_MODEL:-$(_env_from_file OLLAMA_MODEL)}" EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-$(_env_from_file EMBEDDING_DEVICE)}" \
+    python3 "$DEPLOY_DIR/migcompare.py" compare --package "$RESTORE_DIR" \
+        --url "${AI_URL:-http://127.0.0.1:${AI_HOST_PORT:-8000}}" --evidence "$EVI" --form "${FORM:-docker-compose}" \
+        --docs "$(os_count)" --services "$cmp_svcs" --data-check "$dc" --data-check-report "$RUN_DIR/data-check.txt" \
+        --runtime "$EVI/target-runtime.txt" --csv "$RUN_DIR/migration-compare.csv" --timestamp "$RUN_TS" \
+        $([ -f "$RESTORE_DIR/files-rows.tsv" ] && printf -- '--files-rows %s' "$RESTORE_DIR/files-rows.tsv") || crc=$?
+    COMPARE_RESULT="$(cat "$EVI/verdict.txt" 2>/dev/null || echo ERROR)"
+    [ "$crc" -le 1 ] || COMPARE_RESULT="ERROR"
+    status_set compare="$COMPARE_RESULT" compare_dir="$EVI"
+    case "$COMPARE_RESULT" in
+        PASS) ok "이관 동등성 PASS (증적: $EVI)" ;;
+        WARN) warn "이관 동등성 WARN — 이관과 무관하거나 환경 차이인 항목이 있습니다 (증적: $EVI/summary.txt)" ;;
+        *)    warn "이관 동등성 ${COMPARE_RESULT} — $EVI/summary.txt 를 확인하세요" ;;
+    esac
+fi
+
+
+# -----------------------------------------------------------
 # 11. 검증
 #
 # ★ verify.sh 는 verify 계정을 가입시키고 실제로 채팅을 보내 DB 에 기록을
@@ -1393,6 +1468,7 @@ done
 printf '  %-12s %4d초\n' "합계" "$TOTAL"
 echo
 echo "  데이터 보존 : $DATA_RESULT"
+echo "  이관 동등성 : $COMPARE_RESULT"
 echo "  검증 결과 : $VERIFY_RESULT"
 echo "  Frontend  : http://127.0.0.1:${FRONTEND_PORT}"
 echo "  종료      : cd $DEPLOY_DIR && $DOCKER compose down"

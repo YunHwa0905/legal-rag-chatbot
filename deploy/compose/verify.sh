@@ -410,7 +410,7 @@ fi
 [ -f "$RESULTS" ] || echo "$HEADER" > "$RESULTS"
 
 VERDICT=$([ "$FAIL" -eq 0 ] && echo PASS || echo FAIL)
-echo "$(date '+%Y-%m-%d %H:%M:%S'),${FORM},${RUNS},${PASS},${FAIL},$(secs "$COLD_MS"),$(secs "$WARM_MS"),$(secs "$P95_MS"),${SRC_COUNT},${OS_DOCS:-0},${DB_MSGS:-0},${ANSWER_SHA},${ANSWER_UNIQ},${VERDICT}" >> "$RESULTS"
+echo "${RUN_TS:-$(date '+%Y-%m-%d %H:%M:%S')},${FORM},${RUNS},${PASS},${FAIL},$(secs "$COLD_MS"),$(secs "$WARM_MS"),$(secs "$P95_MS"),${SRC_COUNT},${OS_DOCS:-0},${DB_MSGS:-0},${ANSWER_SHA},${ANSWER_UNIQ},${VERDICT}" >> "$RESULTS"
 
 echo
 log "결과: ${PASS} PASS / ${FAIL} FAIL → ${VERDICT}"

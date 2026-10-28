@@ -492,6 +492,8 @@ STRICT="$NO_UPDATE"
 if [ -z "${SNAPSHOT_URI:-}" ]; then
     [ "$STRICT" = "1" ] && die "NO_UPDATE=1 (이관 모드) 에는 SNAPSHOT_URI 가 필요합니다 — backup.sh 패키지 경로를 지정하세요"
     ok "SNAPSHOT_URI 미지정 — 건너뜀"
+    # 지난 이관의 비교 기준이 남아 있으면 up.sh 가 일반 배포를 이관처럼 비교합니다.
+    rm -rf "$DATA_DIR/source-package"
 else
     mkdir -p "$SNAPSHOT_DIR" "$DATA_DIR"
     tmp="$(mktemp -d)"
@@ -632,6 +634,36 @@ else
     elif [ "$STRICT" = "1" ]; then
         warn "runtime-versions.txt 가 없습니다 — Ollama 는 최신 버전으로 설치됩니다"
     fi
+
+    # 이관 비교 기준 — 없어도 멈추지 않습니다(옛 패키지 · GOLDEN=0). 비교표에서 SKIP 으로 남습니다.
+    # 비교는 up.sh 가 기동 뒤에 합니다. 이 임시 폴더는 곧 지우므로 필요한 것만 $DATA_DIR/source-package/ 에 둡니다.
+    # 패키지 파일 대조(T1-2)는 패키지가 있는 지금 합니다.
+    SRC_PKG="$DATA_DIR/source-package"
+    rm -rf "$SRC_PKG"; mkdir -p "$SRC_PKG"
+    for f in source-info.json golden.json package-files.tsv; do
+        if fetch "${SNAPSHOT_URI%/}/$f" "$tmp/$f" 2>/dev/null; then
+            if has_sum "$f"; then check_sum "$f" || die "$f 체크섬 불일치 — 전송이 온전하지 않습니다"; fi
+            cp -L "$tmp/$f" "$SRC_PKG/$f"
+        else
+            rm -f "$tmp/$f"
+        fi
+    done
+    if [ -f "$SRC_PKG/package-files.tsv" ]; then
+        if [ -d "$SNAPSHOT_URI" ]; then
+            cmp_pkg="$(readlink -f "$SNAPSHOT_URI")"
+        else
+            cmp_pkg="$tmp"
+            while IFS=$'\t' read -r f _ _; do
+                [ -n "$f" ] && [ ! -e "$tmp/$f" ] && { fetch "${SNAPSHOT_URI%/}/$f" "$tmp/$f" 2>/dev/null || rm -f "$tmp/$f"; }
+            done < "$SRC_PKG/package-files.tsv"
+        fi
+        if python3 "$REPO_DIR/deploy/migcompare.py" files-check --package "$cmp_pkg" --out "$SRC_PKG/files-rows.tsv"; then
+            ok "패키지 파일 $(grep -c . "$SRC_PKG/package-files.tsv")개 — 이름 · 바이트 · 해시 원본과 같음"
+        else
+            warn "패키지 파일 대조 FAIL — 비교표(migration-compare.csv)에 남깁니다"
+        fi
+    fi
+    [ -f "$tmp/runtime-versions.txt" ] && cp -L "$tmp/runtime-versions.txt" "$SRC_PKG/runtime-versions.txt"
 
     # 압축 해제 전에 공간을 봅니다. 풀다가 No space left 로 죽으면 반쯤 풀린
     # 스냅샷이 남아 다음 시도의 정합성 대조까지 막습니다.

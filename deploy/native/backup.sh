@@ -45,7 +45,8 @@ trap '_rc=$?; if [ "$_rc" -ne 0 ]; then status_set state=failed exit_code="$_rc"
 #   아래 VACUUM INTO 가 "output file already exists" 로 실패합니다.
 #   또 지난 회차 파일이 섞여 남으면 체크섬이 엉뚱한 파일을 가리킬 수 있어,
 #   이 스크립트가 만드는 파일만 골라 지우고 새로 만듭니다.
-for f in opensearch-snapshots.tar.gz lexai.db source-commit.txt data-fingerprint.tsv runtime-versions.txt checksums.sha256 MANIFEST.txt; do
+for f in opensearch-snapshots.tar.gz lexai.db source-commit.txt data-fingerprint.tsv runtime-versions.txt checksums.sha256 MANIFEST.txt \
+         source-info.json golden.json package-files.tsv; do
     rm -f "$OUT_DIR/$f"
 done
 
@@ -249,10 +250,56 @@ fi
 ok "${commit_full:0:7} ($(git -C "$REPO_DIR" branch --show-current 2>/dev/null || echo '-'))"
 
 
-log "4. 체크섬"
+log "4. 이관 비교 기준"
+# -----------------------------------------------------------
+# 타겟이 기동한 뒤 같은 방식으로 다시 재서 대조합니다(migcompare.py compare → migration-compare.csv).
+#   source-info.json  서비스 목록 · 색인 문서 수 · 환경(GPU · 드라이버 · Ollama · 모델) · 생성 설정(온도 · seed)
+#   golden.json       골든 질문마다 검색 결과(근거 문서 ID · 순서)와 답변 — GOLDEN_REPEAT 번 물어 소스끼리도 같은지
+# AI 서버에 직접 묻습니다 — 대화가 DB 에 남지 않아 데이터 지문에 영향이 없고, STOP_WRITES 로 tomcat 이 멈춰 있어도 됩니다.
+#   GOLDEN=0        골든을 뜨지 않음 (기본 1 — AI 서버에 닿지 않으면 경고만)
+#   GOLDEN_REPEAT   골든 질문마다 묻는 횟수 (기본 2)
+# 서비스 이름은 Compose 와 같게(lexai- 를 뗀 역할 이름) 남겨 형태 간 이관에서도 대조됩니다.
+# -----------------------------------------------------------
+MIGCOMPARE="$REPO_DIR/deploy/migcompare.py"
+AI_URL="${AI_URL:-http://127.0.0.1:${AI_PORT}}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-$(env_value OLLAMA_MODEL)}"; export OLLAMA_MODEL="${OLLAMA_MODEL:-legal-gemma}"
+EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-$(env_value EMBEDDING_DEVICE)}"; export EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-cpu}"
+svcs=""
+for u in $UNITS ollama; do
+    if systemctl is-active --quiet "$u" 2>/dev/null; then svcs="$svcs ${u#lexai-}"; fi
+done
+if [ ! -f "$MIGCOMPARE" ]; then
+    warn "$MIGCOMPARE 가 없습니다 — 이관 비교 기준을 건너뜁니다"
+else
+    if python3 "$MIGCOMPARE" source-info --out "$OUT_DIR/source-info.json" --form native --docs "$docs" \
+            --services "$svcs" --runtime "$OUT_DIR/runtime-versions.txt" --url "$AI_URL"; then
+        ok "source-info.json — 서비스 $(printf '%s' "$svcs" | wc -w)개 · 색인 ${docs}건"
+    else
+        warn "source-info.json 을 만들지 못했습니다 — 타겟 비교표의 서비스 · 문서 수 항목이 SKIP 됩니다"
+        rm -f "$OUT_DIR/source-info.json"
+    fi
+    if [ "${GOLDEN:-1}" = "0" ]; then
+        ok "골든 건너뜀 (GOLDEN=0) — 타겟은 LLM 응답 비교를 하지 않습니다"
+    else
+        log "   골든 질문 (AI 서버 $AI_URL · 질문마다 ${GOLDEN_REPEAT:-2}회)"
+        grc=0
+        python3 "$MIGCOMPARE" golden-build --url "$AI_URL" --questions "$REPO_DIR/deploy/golden-questions.txt" \
+            --out "$OUT_DIR/golden.json" --repeat "${GOLDEN_REPEAT:-2}" --runtime "$OUT_DIR/runtime-versions.txt" || grc=$?
+        if [ "$grc" = "0" ]; then
+            ok "golden.json"
+        else
+            rm -f "$OUT_DIR/golden.json"
+            warn "골든을 뜨지 못했습니다 (종료 코드 $grc$([ "$grc" = 3 ] && echo ' — AI 서버에 닿지 않음')) — 타겟은 LLM 응답 비교를 하지 않습니다"
+        fi
+    fi
+fi
+
+
+log "5. 체크섬"
 # 전송 중 손상을 대상 환경에서 곧바로 잡기 위한 파일 단위 해시입니다.
 # (압축을 푼 뒤의 내용 대조는 tar 안의 목록 파일이 담당합니다)
-( cd "$OUT_DIR" && sha256sum opensearch-snapshots.tar.gz lexai.db source-commit.txt data-fingerprint.tsv runtime-versions.txt > checksums.sha256 )
+( cd "$OUT_DIR" && sha256sum opensearch-snapshots.tar.gz lexai.db source-commit.txt data-fingerprint.tsv runtime-versions.txt \
+    $(for f in source-info.json golden.json; do [ -f "$f" ] && printf '%s ' "$f"; done) > checksums.sha256 )
 ok "checksums.sha256"
 
 snap_files=$(wc -l < "$SNAPSHOT_DIR/$MANIFEST_NAME")
@@ -268,7 +315,7 @@ if [ "$SERVING" = "1" ]; then
 fi
 
 
-log "5. 매니페스트"
+log "6. 매니페스트"
 # -----------------------------------------------------------
 cat > "$OUT_DIR/MANIFEST.txt" <<EOF
 LexAI 이관 패키지
@@ -285,7 +332,10 @@ LexAI 이관 패키지
   source-commit.txt            패키지를 만든 시점의 저장소 커밋 (전체 해시)
   data-fingerprint.tsv         테이블별 행 수 · 내용 해시 (대상에서 자동 비교)
   runtime-versions.txt         Ollama 버전 · 모델 ID (대상이 같은 버전으로 설치, 모델 비교)
-  checksums.sha256             위 다섯 파일의 SHA-256
+  source-info.json             서비스 목록 · 색인 문서 수 · 환경 · 생성 설정 (이관 비교 기준)
+  golden.json                  골든 질문의 검색 결과 · 답변 (이관 비교 기준, GOLDEN=0 이면 없음)
+  checksums.sha256             위 파일들의 SHA-256
+  package-files.tsv            이 폴더 파일 전부의 이름 · 바이트 · SHA-256 (대상이 개수 · 용량까지 대조)
 
 정합성 확인
   전송 직후   sha256sum -c checksums.sha256
@@ -324,6 +374,13 @@ LexAI 이관 패키지
      재사용하려면 맞춰두는 편이 편합니다.
 EOF
 ok "MANIFEST.txt"
+
+# 파일 목록 — 이 폴더의 파일 전부(이름 · 바이트 · sha256). 맨 마지막에 만들어 MANIFEST 까지 담습니다.
+if [ -f "$MIGCOMPARE" ]; then
+    python3 "$MIGCOMPARE" inventory "$OUT_DIR" --out "$OUT_DIR/package-files.tsv" \
+        || die "package-files.tsv 를 만들지 못했습니다"
+    ok "package-files.tsv ($(wc -l < "$OUT_DIR/package-files.tsv")개 파일)"
+fi
 
 
 echo
