@@ -159,6 +159,19 @@ def main():
     assert r["pre:deterministic"][0] == "INFO"
     print("c5 ok")
 
+    # 5-1) AI 서버가 생성 설정을 알려 주지 않음(옛 이미지) — 확인 불가라 FAIL 이 아니라 SKIP, 검색만 판정
+    g = json.load(open(os.path.join(pkg, "golden.json")))
+    g["llm"] = {"temperature": None, "seed": None}
+    g["deterministic"] = False
+    json.dump(g, open(os.path.join(pkg, "golden.json"), "w"))
+    STATE["temp"], STATE["seed"] = None, None
+    rc, r, out, err = compare("c55")
+    assert r["pre:temperature"][0] == "SKIP" and r["pre:seed"][0] == "SKIP", r
+    assert r["q03"][0] == "SKIP" and r["q01"][0] == "PASS", (r["q03"], r["q01"])
+    assert "FAIL" not in [v[0] for k, v in r.items() if k.startswith(("pre:", "q0"))], r
+    STATE["temp"], STATE["seed"] = 0.1, -1
+    print("c5-1 ok")
+
     # 6) 골든 없는 옛 패키지 → T2 SKIP, 비교표 머리줄 · 타임스탬프
     os.remove(os.path.join(pkg, "golden.json"))
     run("inventory", pkg, "--out", os.path.join(pkg, "package-files.tsv"))

@@ -403,12 +403,17 @@ def compare_golden(R, pkg, url, runtime, evidence, age_default):
         R.add("T2", "target:health", "-", "-", "FAIL", "타겟 AI 서버에 닿지 않음: %s" % e)
         return None
 
-    # 전제 — 생성 설정
+    # 전제 — 생성 설정. 값을 모르면(AI 서버가 /health 에 알려 주지 않는 옛 이미지) "다름"이 아니라 "확인 불가"다 —
+    # 이때는 문장 비교를 건너뛰고(비결정적으로 본다) 검색 결과만 판정한다. 둘 다 알 때 다르면 FAIL.
     pre_ok = True
     for k in ("temperature", "seed"):
         s, t = src_llm.get(k), tgt_llm.get(k)
+        if s is None or t is None:
+            R.add("T2", "pre:" + k, s, t, "SKIP",
+                  "AI 서버가 생성 설정을 알려 주지 않음 (/health 에 llm_%s 없음 — 옛 AI 이미지) — 문장 비교는 건너뜀" % k)
+            continue
         try:
-            same = s is not None and t is not None and float(s) == float(t)
+            same = float(s) == float(t)
         except (TypeError, ValueError):
             same = False
         pre_ok = pre_ok and same
