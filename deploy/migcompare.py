@@ -549,7 +549,8 @@ def cmd_compare(a):
     for name in ("golden.json", "source-info.json", "package-files.tsv", "runtime-versions.txt"):
         p = os.path.join(a.package, name)
         if os.path.isfile(p):
-            with open(p, "rb") as fi, open(os.path.join(a.evidence, "source-" + name), "wb") as fo:
+            # 원래 이름 그대로 — 콘솔이 verify/evidence/golden.json 을 「질문 응답 동일성」 증적으로 읽습니다 (WidgetRAG 와 같음)
+            with open(p, "rb") as fi, open(os.path.join(a.evidence, name), "wb") as fo:
                 fo.write(fi.read())
     if tgt is not None:
         write_json(os.path.join(a.evidence, "target-golden.json"), tgt)
