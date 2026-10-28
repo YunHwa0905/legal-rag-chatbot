@@ -101,3 +101,6 @@ class DocumentDetail(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     message: str
+    # 지금 적용된 생성 설정 — 이관 전후 답변 비교의 전제(온도 0 · seed 고정)를 확인합니다.
+    llm_temperature: float
+    llm_seed: int

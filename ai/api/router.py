@@ -19,6 +19,7 @@ from api.schemas import (
 )
 from rag.pipeline import get_pipeline
 from rag.summarize import update_summary
+from core.config import settings
 
 router = APIRouter()
 
@@ -30,7 +31,9 @@ router = APIRouter()
 async def health_check():
     return HealthResponse(
         status="ok",
-        message="Legal RAG Chatbot API is running"
+        message="Legal RAG Chatbot API is running",
+        llm_temperature=settings.TEMPERATURE,
+        llm_seed=settings.LLM_SEED,
     )
 
 

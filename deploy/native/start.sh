@@ -102,7 +102,9 @@ write_env_file() {
 
     local seed temp
     seed="$(env_value LLM_SEED)"
-    temp="$(env_value TEMPERATURE)"
+    # LLM_TEMPERATURE(이관 오케스트레이터 · WidgetRAG 와 같은 이름)가 있으면 그 값이 이깁니다.
+    temp="$(env_value LLM_TEMPERATURE)"
+    [ -n "$temp" ] || temp="$(env_value TEMPERATURE)"
 
     sudo mkdir -p "$ENV_DIR"
     {

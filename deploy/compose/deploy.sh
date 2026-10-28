@@ -163,6 +163,9 @@ NO_UPDATE="${NO_UPDATE:-0}"
 FORCE_CLEAN="${FORCE_CLEAN:-0}"
 RUN_VERIFY="${RUN_VERIFY:-0}"
 SKIP_VERIFY="${SKIP_VERIFY:-0}"
+# 이관 오케스트레이터 · WidgetRAG 는 LLM_TEMPERATURE 라는 이름을 씁니다 — 있으면 그 값이 이깁니다.
+# 여기서 TEMPERATURE 로 옮겨 담아 아래(재실행 · 재부팅 유닛 · .env 생성)는 그대로 씁니다.
+TEMPERATURE="${LLM_TEMPERATURE:-${TEMPERATURE:-}}"
 for arg in "${@:-}"; do
     case "$arg" in
         --resume)   RESUME=1 ;;

@@ -110,7 +110,8 @@ services:
       RAG_TOP_K: ${RAG_TOP_K:-6}
       RAG_MIN_SCORE: ${RAG_MIN_SCORE:-0.5}
       MAX_NEW_TOKENS: ${MAX_NEW_TOKENS:-768}
-      TEMPERATURE: ${TEMPERATURE:-0.1}
+      # LLM_TEMPERATURE(이관 오케스트레이터 · WidgetRAG 와 같은 이름)가 있으면 그 값이 이깁니다.
+      TEMPERATURE: ${LLM_TEMPERATURE:-${TEMPERATURE:-0.1}}
       TOP_P: ${TOP_P:-0.9}
       # 이관 전후 동등성 비교용. -1 은 미지정(평소 운영) 입니다.
       LLM_SEED: ${LLM_SEED:--1}
@@ -124,6 +125,10 @@ services:
       - hf_cache:/root/.cache/huggingface
     expose:
       - "8000"
+    # VM 안에서만 /api/v1/health 를 볼 수 있게 — 127.0.0.1 로 묶어 VM 밖에서는 닿지 않습니다
+    # (이관 오케스트레이터가 백업 전에 온도 · seed 를 확인합니다).
+    ports:
+      - "127.0.0.1:${AI_HOST_PORT:-8000}:8000"
     depends_on:
       opensearch:
         condition: service_healthy

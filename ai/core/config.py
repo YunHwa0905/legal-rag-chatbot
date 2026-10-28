@@ -1,3 +1,4 @@
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -75,7 +76,9 @@ class Settings(BaseSettings):
     # 모델 추론 설정
     # ===========================
     MAX_NEW_TOKENS: int = 768
-    TEMPERATURE: float = 0.1
+    # LLM_TEMPERATURE 가 있으면 그 값을, 없으면 TEMPERATURE 를 씁니다.
+    # 이관 오케스트레이터 · WidgetRAG 는 LLM_TEMPERATURE 라는 이름을 씁니다.
+    TEMPERATURE: float = Field(0.1, validation_alias=AliasChoices("LLM_TEMPERATURE", "TEMPERATURE"))
     TOP_P: float = 0.9
     DO_SAMPLE: bool = True
 
