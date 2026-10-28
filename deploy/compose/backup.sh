@@ -129,7 +129,7 @@ for f in $DEPLOY_FILES DEPLOY_COMMIT; do
     [ -f "$f" ] || die "배포 디렉터리에 $f 가 없습니다 — deploy.sh 로 배포한 디렉터리에서 실행하세요"
 done
 [ "$(compose ps -q opensearch 2>/dev/null)" != "" ] \
-    || die "OpenSearch 컨테이너가 없습니다 — docker compose up -d 후 다시 실행하세요"
+    || die "OpenSearch 컨테이너가 없습니다 — $DOCKER compose up -d 후 다시 실행하세요"
 
 mkdir -p "$OUT_DIR"
 # 이전 회차 패키지 정리 — 고정 경로라 지난 파일이 섞이면 체크섬이 엉뚱한 파일을
@@ -150,7 +150,7 @@ if [ "$STOP_WRITES" = "1" ]; then
     log "0. 쓰기 중지 (STOP_WRITES=1)"
     compose stop frontend tomcat >/dev/null
     [ -z "$(compose ps -q --status running tomcat 2>/dev/null)" ] || die "tomcat 이 멈추지 않았습니다"
-    ok "frontend · tomcat 정지 — 이후 DB 쓰기 없음 (취소하려면: docker compose start frontend tomcat)"
+    ok "frontend · tomcat 정지 — 이후 DB 쓰기 없음 (취소하려면: $DOCKER compose start frontend tomcat)"
 elif [ "$(front_code)" = "200" ]; then
     SERVING=1
 else
@@ -258,7 +258,7 @@ out="$(trun -v "$OUT_DIR:/out" -v "$DEPLOY_DIR/datacheck.sh:/opt/datacheck.sh:ro
     echo msgs=\$(sqlite3 /out/lexai.db 'SELECT COUNT(*) FROM chat_message;')
     echo uv=\$(sqlite3 /out/lexai.db 'PRAGMA user_version;')
     chown $(id -u):$(id -g) /out/lexai.db /out/data-fingerprint.tsv")" \
-    || die "VACUUM INTO · 데이터 지문 실패 — docker compose logs tomcat 과 볼륨을 확인하세요"
+    || die "VACUUM INTO · 데이터 지문 실패 — $DOCKER compose logs tomcat 과 볼륨을 확인하세요"
 [ -s "$OUT_DIR/lexai.db" ] || die "DB 사본이 비어 있습니다"
 [ -s "$OUT_DIR/data-fingerprint.tsv" ] || die "데이터 지문이 비어 있습니다"
 users="$(printf '%s\n' "$out" | sed -n 's/^users=//p')"
@@ -391,5 +391,5 @@ du -h "$OUT_DIR"/* | sed 's/^/  /'
 if [ "$STOP_WRITES" = "1" ]; then
     echo
     warn "frontend · tomcat 은 멈춘 상태입니다. 이관을 취소할 때만 다시 켜세요:"
-    warn "  cd $DEPLOY_DIR && docker compose start frontend tomcat"
+    warn "  cd $DEPLOY_DIR && $DOCKER compose start frontend tomcat"
 fi

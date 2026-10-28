@@ -1002,7 +1002,7 @@ $(printf '%s\n' "$bad" | sed 's/^/    /')"
     if [ -n "$others" ]; then
         die "이름이 겹치는 다른 LexAI 컨테이너가 있습니다 — 기동할 수 없습니다
 $(printf '%s\n' "$others" | sed 's/^/    /')
-  다른 배포 디렉터리의 스택이면 그 디렉터리에서 docker compose down 후 다시 실행하세요."
+  다른 배포 디렉터리의 스택이면 그 디렉터리에서 $DOCKER compose down 후 다시 실행하세요."
     fi
 
     if [ "${#existing[@]}" -gt 0 ]; then
@@ -1087,7 +1087,7 @@ if [ "$NO_START" = "1" ]; then
     echo
     status_set state=prepared phase=compose:prepared finished_at="$(now_iso)"
     log "준비 완료 (NO_START=1 — 기동은 하지 않았습니다)"
-    echo "  기동: cd $DEPLOY_DIR && docker compose up -d --no-build   (.env 의 COMPOSE_FILE 사용)"
+    echo "  기동: cd $DEPLOY_DIR && $DOCKER compose up -d --no-build   (.env 의 COMPOSE_FILE 사용)"
     exit 0
 fi
 
@@ -1178,8 +1178,8 @@ fi
 # -----------------------------------------------------------
 logt "색인 — OpenSearch 만 먼저 기동"
 compose up -d --no-build opensearch >/dev/null \
-    || die "OpenSearch 를 띄우지 못했습니다 — docker compose logs opensearch"
-wait_healthy opensearch 600 || die "OpenSearch 가 10분 안에 준비되지 않았습니다 — docker compose logs opensearch"
+    || die "OpenSearch 를 띄우지 못했습니다 — $DOCKER compose logs opensearch"
+wait_healthy opensearch 600 || die "OpenSearch 가 10분 안에 준비되지 않았습니다 — $DOCKER compose logs opensearch"
 # ★ 헬스체크(응답만 오면 통과)보다 보안 플러그인 초기화가 늦습니다. 그 사이의
 #   요청은 "OpenSearch Security not initialized"(503)로 거절되므로 200 을 기다립니다.
 os_up=0
@@ -1187,7 +1187,7 @@ for _ in $(seq 1 60); do
     if [ "$( { os -o /dev/null -w '%{http_code}' "$OS_BASE/_cluster/health"; } 2>/dev/null || true)" = "200" ]; then os_up=1; break; fi
     sleep 3
 done
-[ "$os_up" = "1" ] || die "OpenSearch 가 요청을 받지 않습니다(보안 플러그인 초기화 · 인증) — docker compose logs opensearch"
+[ "$os_up" = "1" ] || die "OpenSearch 가 요청을 받지 않습니다(보안 플러그인 초기화 · 인증) — $DOCKER compose logs opensearch"
 ok "OpenSearch 준비됨"
 
 if [ "$HAVE_PKG" = "1" ] && [ "$PKG_SKIP" = "0" ]; then
@@ -1226,7 +1226,7 @@ $(printf '%s' "$resp" | head -c 700)"
     fi
     os "$OS_BASE/_cluster/health/${INDEX_NAME}?wait_for_status=yellow&timeout=120s" >/dev/null || true
     count="$(os_count)"
-    [ "${count:-0}" -gt 0 ] 2>/dev/null || die "복원 후에도 색인이 비어 있습니다 (df -h · docker compose logs opensearch)"
+    [ "${count:-0}" -gt 0 ] 2>/dev/null || die "복원 후에도 색인이 비어 있습니다 (df -h · $DOCKER compose logs opensearch)"
     ok "복원 완료 — ${count}건 ($(( $(date +%s) - started ))초)"
     status_set index_docs="$count"
 elif [ "$PKG_SKIP" = "1" ]; then
@@ -1271,11 +1271,11 @@ phase_begin "기동"
 # ollama-init 이 모델(약 5GB)을 받는 동안 up 이 기다립니다(ai 의 depends_on).
 logt "서비스 기동 (최초에는 모델 다운로드로 수 분 걸립니다)"
 compose up -d --no-build \
-    || die "기동 실패 — docker compose logs ollama-init · docker compose ps -a 를 확인하세요"
+    || die "기동 실패 — $DOCKER compose logs ollama-init · $DOCKER compose ps -a 를 확인하세요"
 
-wait_healthy ai 1200 || die "ai 가 20분 안에 준비되지 않았습니다 — docker compose logs ai"
+wait_healthy ai 1200 || die "ai 가 20분 안에 준비되지 않았습니다 — $DOCKER compose logs ai"
 ok "ai 준비됨"
-wait_healthy tomcat 300 || die "tomcat 이 5분 안에 준비되지 않았습니다 — docker compose logs tomcat"
+wait_healthy tomcat 300 || die "tomcat 이 5분 안에 준비되지 않았습니다 — $DOCKER compose logs tomcat"
 ok "tomcat 준비됨"
 code=000
 for _ in $(seq 1 24); do
@@ -1283,7 +1283,7 @@ for _ in $(seq 1 24); do
     if [ "$code" = "200" ]; then break; fi
     sleep 5
 done
-[ "$code" = "200" ] || die "프론트엔드가 응답하지 않습니다 (HTTP $code, 포트 ${FRONTEND_PORT}) — docker compose logs frontend"
+[ "$code" = "200" ] || die "프론트엔드가 응답하지 않습니다 (HTTP $code, 포트 ${FRONTEND_PORT}) — $DOCKER compose logs frontend"
 ok "프론트엔드 HTTP 200 (포트 ${FRONTEND_PORT})"
 
 # 이관 없이 기동만 하는 경우 — 색인이 아예 없으면 검색이 404 로 떨어져 채팅이
@@ -1296,7 +1296,7 @@ if [ "$HAVE_PKG" = "0" ] && [ "$(os_code)" = "404" ]; then
     if [ "$(os_code)" = "200" ]; then
         ok "빈 색인 생성 (매핑만)"
     else
-        warn "빈 색인 생성 실패 — 채팅이 에러가 날 수 있습니다 (docker compose logs ai)"
+        warn "빈 색인 생성 실패 — 채팅이 에러가 날 수 있습니다 ($DOCKER compose logs ai)"
     fi
 fi
 
@@ -1392,7 +1392,7 @@ echo
 echo "  데이터 보존 : $DATA_RESULT"
 echo "  검증 결과 : $VERIFY_RESULT"
 echo "  Frontend  : http://127.0.0.1:${FRONTEND_PORT}"
-echo "  종료      : cd $DEPLOY_DIR && docker compose down"
+echo "  종료      : cd $DEPLOY_DIR && $DOCKER compose down"
 status_set total_seconds="$TOTAL"
 
 # 검증 결과 처리는 네이티브 up.sh 와 같습니다 — 이관 모드(VERIFY_GATE=0)에서는
@@ -1401,6 +1401,6 @@ if [ "$VERIFY_RESULT" = "FAIL" ] && [ "$VERIFY_GATE" = "0" ]; then
     warn "검증 FAIL — 이관(데이터 보존 · 기동)은 성공으로 끝냅니다. 원인: ~/lexai-run/results.csv"
 fi
 if [ "$VERIFY_RESULT" = "FAIL" ] && [ "$VERIFY_GATE" = "1" ]; then
-    die "검증 FAIL — 위 항목과 docker compose logs 를 확인하세요"
+    die "검증 FAIL — 위 항목과 $DOCKER compose logs 를 확인하세요"
 fi
 status_set state=success phase=done exit_code=0 finished_at="$(now_iso)"

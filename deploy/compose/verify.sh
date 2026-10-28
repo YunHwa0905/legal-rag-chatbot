@@ -194,7 +194,7 @@ except Exception: print(0)' 2>/dev/null)
         # 비어 있는 게 전제인 기동 검증에서는 예상된 결과입니다.
         warn "답변 없음 ($(secs "$COLD_MS")초) — 빈 색인이라 예상된 결과입니다 (ALLOW_EMPTY_INDEX=1)"
     else
-        fail "답변 없음 ($(secs "$COLD_MS")초) — docker compose logs ai"
+        fail "답변 없음 ($(secs "$COLD_MS")초) — $DOCKER compose logs ai"
     fi
 
     # 근거 문서가 0건이면 색인이 비었거나 벡터 검색이 죽은 것입니다.
@@ -206,7 +206,7 @@ except Exception: print(0)' 2>/dev/null)
     if [ "${SRC_COUNT:-0}" -gt 0 ]; then
         pass "근거 문서 ${SRC_COUNT}건 (RAG 동작)"
     elif [ "${SRC_COUNT:-0}" -lt 0 ]; then
-        fail "응답을 읽지 못했습니다 — 서비스가 아직 뜨지 않았거나 오류 응답입니다 (docker compose logs ai)"
+        fail "응답을 읽지 못했습니다 — 서비스가 아직 뜨지 않았거나 오류 응답입니다 ($DOCKER compose logs ai)"
     elif [ "$ALLOW_EMPTY_INDEX" = "1" ]; then
         warn "근거 문서 0건 — 빈 색인이라 예상된 결과입니다 (ALLOW_EMPTY_INDEX=1)"
     else
@@ -386,7 +386,7 @@ for svc in ai tomcat frontend opensearch; do
         | grep -E "Traceback \(most recent|^Caused by:|Exception in thread|\bERROR\b|\bSEVERE\b" \
         | grep -vc "Not yet initialized"; } || true )
     if [ "${n:-0}" -gt 0 ]; then
-        warn "${svc} 에 에러 흔적 ${n}건 — docker compose logs ${svc}"
+        warn "${svc} 에 에러 흔적 ${n}건 — $DOCKER compose logs ${svc}"
         errs=$((errs + n))
     fi
 done
