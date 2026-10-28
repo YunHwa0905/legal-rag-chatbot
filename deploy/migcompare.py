@@ -25,7 +25,7 @@
 #
 #   T2 판정 (질문마다)
 #     소스 응답 비정상 · 소스끼리도 답이 다름          SKIP  이관과 무관
-#     타겟 응답 비정상 (오류 · 빈 답변)                FAIL
+#     타겟 응답 비정상 (오류 · 빈 답변 · 대체 응답)     FAIL
 #     검색 결과(근거 문서 ID · 순서)가 다름            FAIL  데이터 · 색인 확인
 #     검색 같음 · 문장 같음                            PASS
 #     검색 같음 · 문장 다름 · 생성 설정이 비결정적      SKIP  문장 비교 불가 (온도 0 · seed 고정 필요)
@@ -183,9 +183,13 @@ def ask(url, question, age):
         r["answer"] = ans if isinstance(ans, str) else None
         r["sources"] = [{"doc_id": s.get("doc_id"), "score": s.get("score")} for s in (d.get("sources") or [])]
         r["standalone_query"] = d.get("standalone_query")
-        r["ok"] = bool(r["answer"] and r["answer"].strip())
-        if not r["ok"]:
+        if not (r["answer"] and r["answer"].strip()):
             r["error"] = "빈 답변"
+        elif not r["sources"]:
+            # 검색 결과가 없으면 파이프라인이 고정 문구(대체 응답)로 답합니다 — 정상 응답이 아닙니다.
+            r["error"] = "대체 응답 (근거 문서 없음)"
+        else:
+            r["ok"] = True
     except urllib.error.HTTPError as e:
         r["error"] = "HTTP %d" % e.code
     except Exception as e:  # 연결 실패 · 타임아웃
@@ -437,7 +441,7 @@ def compare_golden(R, pkg, url, runtime, evidence, age_default):
           "-" if st == "ok" else "소스 골든 일부 비정상 — 해당 문항은 이관과 무관으로 건너뜀")
 
     out_items = []
-    diff_dir = os.path.join(evidence, "diffs")
+    diff_dir = os.path.join(evidence, "golden-diff")  # 콘솔이 이 이름으로 읽습니다 (WidgetRAG 와 같음)
     for it in items:
         qid, q = it["id"], it["question"]
         tgt = ask(url, q, it.get("age") or age_default)

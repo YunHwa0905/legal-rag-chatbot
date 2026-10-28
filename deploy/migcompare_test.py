@@ -64,6 +64,7 @@ def main():
     STATE["flaky"] = {"Q5 소스불안정"}
     rc, out, err = run("golden-build", "--url", url, "--questions", qf, "--out", os.path.join(pkg, "golden.json"), "--runtime", rt)
     assert rc == 0, err
+    shutil.copy(os.path.join(pkg, "golden.json"), os.path.join(d, "golden.bak"))
     g = json.load(open(os.path.join(pkg, "golden.json")))
     assert g["deterministic"] and g["items"][4]["stable"] is False and g["items"][0]["stable"], g
     rc, out, err = run("source-info", "--out", os.path.join(pkg, "source-info.json"), "--form", "compose",
@@ -98,7 +99,7 @@ def main():
     assert r["q04"][0] == "FAIL" and "타겟 응답 비정상" in r["q04"][1]
     assert r["q05"][0] == "SKIP", r["q05"]
     assert r["services:count"][0] == "PASS" and r["files:count"][0] == "PASS" and r["index:docs"][0] == "PASS"
-    assert os.path.isfile(os.path.join(ev, "c1", "diffs", "q03.diff"))
+    assert os.path.isfile(os.path.join(ev, "c1", "golden-diff", "q03.diff"))
     print("c1 ok")
 
     # 2) 환경 다름(Ollama 버전) → Q3 WARN, 나머지 정상 → 전체 WARN
@@ -175,6 +176,16 @@ def main():
     rc, r, out, err = compare("c8", files_rows=fr)
     assert r["files:count"][0] == "PASS", r
     print("c6-1 ok")
+
+    # 6-2) 대체 응답 — 근거 문서 없이 고정 문구로 답함 → FAIL
+    run("inventory", pkg, "--out", os.path.join(pkg, "package-files.tsv"))
+    shutil.copy(os.path.join(d, "golden.bak"), os.path.join(pkg, "golden.json"))
+    STATE["temp"], STATE["seed"], STATE["answers"] = 0.0, 42, {}
+    STATE["ids"] = {"Q1 같음": []}
+    rc, r, out, err = compare("c9")
+    assert r["q01"][0] == "FAIL" and "대체 응답" in r["q01"][1], r["q01"]
+    STATE["ids"] = {}
+    print("c6-2 ok")
 
     # 7) AI 서버 없음 → golden-build 종료코드 3
     rc, out, err = run("golden-build", "--url", "http://127.0.0.1:1", "--questions", qf, "--out", os.path.join(d, "x.json"))
