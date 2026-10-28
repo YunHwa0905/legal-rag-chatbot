@@ -64,6 +64,12 @@ front_code() {
 }
 SERVING=0
 STOP_WRITES="${STOP_WRITES:-0}"
+# 이관 비교 기준의 서비스 목록 — 쓰기 중지로 frontend · tomcat 을 멈추기 전에 잽니다(타겟은 다 떠 있는 상태와 대조).
+# 이름은 Compose 와 같게(lexai- 를 뗀 역할 이름) 남겨 형태 간 이관에서도 대조됩니다.
+SVCS_RUNNING=""
+for u in $UNITS ollama; do
+    if systemctl is-active --quiet "$u" 2>/dev/null; then SVCS_RUNNING="$SVCS_RUNNING ${u#lexai-}"; fi
+done
 if [ "$STOP_WRITES" = "1" ]; then
     # -----------------------------------------------------------
     # 쓰기 중지 (전환용)
@@ -258,16 +264,12 @@ log "4. 이관 비교 기준"
 # AI 서버에 직접 묻습니다 — 대화가 DB 에 남지 않아 데이터 지문에 영향이 없고, STOP_WRITES 로 tomcat 이 멈춰 있어도 됩니다.
 #   GOLDEN=0        골든을 뜨지 않음 (기본 1 — AI 서버에 닿지 않으면 경고만)
 #   GOLDEN_REPEAT   골든 질문마다 묻는 횟수 (기본 2)
-# 서비스 이름은 Compose 와 같게(lexai- 를 뗀 역할 이름) 남겨 형태 간 이관에서도 대조됩니다.
 # -----------------------------------------------------------
 MIGCOMPARE="$REPO_DIR/deploy/migcompare.py"
 AI_URL="${AI_URL:-http://127.0.0.1:${AI_PORT}}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-$(env_value OLLAMA_MODEL)}"; export OLLAMA_MODEL="${OLLAMA_MODEL:-legal-gemma}"
 EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-$(env_value EMBEDDING_DEVICE)}"; export EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-cpu}"
-svcs=""
-for u in $UNITS ollama; do
-    if systemctl is-active --quiet "$u" 2>/dev/null; then svcs="$svcs ${u#lexai-}"; fi
-done
+svcs="$SVCS_RUNNING"   # 쓰기 중지 전에 잰 값
 if [ ! -f "$MIGCOMPARE" ]; then
     warn "$MIGCOMPARE 가 없습니다 — 이관 비교 기준을 건너뜁니다"
 else

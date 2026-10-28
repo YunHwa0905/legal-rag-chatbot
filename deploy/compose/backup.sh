@@ -149,6 +149,8 @@ front_code() {
     curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:${FRONTEND_PORT}/" 2>/dev/null || echo 000
 }
 SERVING=0
+# 이관 비교 기준의 서비스 목록 — 쓰기 중지로 frontend · tomcat 을 멈추기 전에 잽니다(타겟은 다 떠 있는 상태와 대조).
+SVCS_RUNNING="$( { compose ps --status running --services 2>/dev/null | sort | tr '\n' ' '; } || true )"
 if [ "$STOP_WRITES" = "1" ]; then
     # ★ 무중지 백업은 패키지를 만든 뒤 전환하기 전까지 들어온 대화를 놓칩니다.
     #   리뷰어가 그 사이 채팅하면 이관 후 "데이터가 사라졌다" 로 보입니다.
@@ -340,7 +342,7 @@ AI_HOST_PORT="${AI_HOST_PORT:-$(_env AI_HOST_PORT)}"
 AI_URL="${AI_URL:-http://127.0.0.1:${AI_HOST_PORT:-8000}}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-$(_env OLLAMA_MODEL)}"; export OLLAMA_MODEL="${OLLAMA_MODEL:-legal-gemma}"
 EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-$(_env EMBEDDING_DEVICE)}"; export EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-cpu}"
-svcs="$( { compose ps --status running --services 2>/dev/null | sort | tr '\n' ' '; } || true )"
+svcs="$SVCS_RUNNING"   # 쓰기 중지 전에 잰 값
 if python3 migcompare.py source-info --out "$OUT_DIR/source-info.json" --form compose --docs "$docs" \
         --services "$svcs" --runtime "$OUT_DIR/runtime-versions.txt" --url "$AI_URL"; then
     ok "source-info.json — 서비스 $(printf '%s' "$svcs" | wc -w)개 · 색인 ${docs}건"
