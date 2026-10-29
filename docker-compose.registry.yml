@@ -29,6 +29,8 @@
 #   태그 이력
 #     v1  MySQL + Caddy 구성 (2026-09-21)
 #     v2  SQLite 전환 · Caddy 제거 · Redis 비활성화 (2026-09-22)
+#     v3  AI 서버 /health 에 생성 설정(llm_temperature · llm_seed) · LLM_TEMPERATURE 이름 지원 (2026-10-28)
+#         frontend · tomcat 은 v2 와 같은 이미지 (태그만 v3)
 #
 #   v1 을 지우지 않고 남겨두면 문제가 생겼을 때 되돌릴 수 있습니다.
 # ===========================================================
@@ -36,13 +38,13 @@
 services:
 
   frontend:
-    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-frontend:${IMAGE_TAG:-v2}
+    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-frontend:${IMAGE_TAG:-v3}
     build: !reset null
 
   tomcat:
-    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-tomcat:${IMAGE_TAG:-v2}
+    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-tomcat:${IMAGE_TAG:-v3}
     build: !reset null
 
   ai:
-    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-ai:${IMAGE_TAG:-v2}
+    image: ${REGISTRY_PREFIX:-yunhwa0905}/lexai-ai:${IMAGE_TAG:-v3}
     build: !reset null

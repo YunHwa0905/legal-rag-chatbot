@@ -39,7 +39,7 @@
 #   BRANCH            compose 정의를 받을 브랜치   기본 feat/sqlite
 #   DEPLOY_DIR        배포 디렉터리                기본 ~/lexai-compose
 #   REGISTRY_PREFIX   레지스트리                   기본 yunhwa0905
-#   IMAGE_TAG         이미지 태그                  기본 v2
+#   IMAGE_TAG         이미지 태그                  기본 v3
 #   SNAPSHOT_URI      이관 패키지 위치             s3://… 또는 https://…
 #   SKIP_DRIVER=1     드라이버 설치 건너뛰기 (GPU 이미지를 쓰는 경우)
 #   NO_START=1        준비만 하고 기동은 안 함
@@ -56,7 +56,7 @@
 #
 # 예) 다른 CSP 의 레지스트리에서 받아 띄우기
 #   curl -fsSL <raw url> | REGISTRY_PREFIX=asia-northeast3-docker.pkg.dev/proj/repo \
-#        IMAGE_TAG=v2 SNAPSHOT_URI=s3://버킷/lexai/20260923-1031 bash
+#        IMAGE_TAG=v3 SNAPSHOT_URI=s3://버킷/lexai/20260923-1031 bash
 # ===========================================================
 
 set -euo pipefail
@@ -151,7 +151,7 @@ _env_from_file() {
 REGISTRY_PREFIX="${REGISTRY_PREFIX:-$(_env_from_file REGISTRY_PREFIX)}"
 REGISTRY_PREFIX="${REGISTRY_PREFIX:-yunhwa0905}"
 IMAGE_TAG="${IMAGE_TAG:-$(_env_from_file IMAGE_TAG)}"
-IMAGE_TAG="${IMAGE_TAG:-v2}"
+IMAGE_TAG="${IMAGE_TAG:-v3}"
 REPO_API="${REPO_API:-https://api.github.com/repos/${REPO_RAW#https://raw.githubusercontent.com/}}"
 REPO_GIT="${REPO_GIT:-https://github.com/${REPO_RAW#https://raw.githubusercontent.com/}.git}"
 INDEX_NAME="${INDEX_NAME:-legal_documents}"

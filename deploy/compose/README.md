@@ -22,7 +22,7 @@ curl -fsSL <위 주소> | SNAPSHOT_URI=s3://버킷/lexai/20260923-1031 bash
 
 ```bash
 curl -fsSL <위 주소> \
-  | REGISTRY_PREFIX=asia-northeast3-docker.pkg.dev/<프로젝트>/<저장소> IMAGE_TAG=v2 bash
+  | REGISTRY_PREFIX=asia-northeast3-docker.pkg.dev/<프로젝트>/<저장소> IMAGE_TAG=v3 bash
 ```
 
 ## 네이티브와 갈리는 지점
@@ -91,7 +91,7 @@ toolkit 이 없으면 **에러 없이 CPU 로 폴백합니다.** 컨테이너는
 | `BRANCH` | `feat/sqlite` | compose 정의를 받을 브랜치 (받는 순간의 커밋으로 고정) |
 | `DEPLOY_DIR` | `~/lexai-compose` | 배포 디렉터리 |
 | `REGISTRY_PREFIX` | `yunhwa0905` | Docker Hub 계정 또는 레지스트리 주소 |
-| `IMAGE_TAG` | `v2` | **고정 태그를 쓰세요** — `latest` 는 추적이 안 됩니다 |
+| `IMAGE_TAG` | `v3` | **고정 태그를 쓰세요** — `latest` 는 추적이 안 됩니다 |
 | `SNAPSHOT_URI` | 없음 | 이관 패키지 위치 (로컬 경로 · `s3://` · `gs://` · `https://`) |
 | `NO_UPDATE` | `0` | **이관 모드.** 옮겨 온 배포 디렉터리를 그대로 쓰고 하나라도 어긋나면 멈춤 |
 | `FORCE_CLEAN` | `0` | 기존 데이터 볼륨이 있어도 진행 (DB 는 `~/lexai-replaced/<시각>` 에 보관, 모델 볼륨 유지) |
